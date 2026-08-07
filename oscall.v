@@ -10,6 +10,7 @@ fn C.dlopen(filename &char, flags int) voidptr
 fn C.dlsym(handle voidptr, symbol &char) voidptr
 fn C.dlclose(handle voidptr) int
 fn C.memcpy(dest voidptr, src voidptr, n int) voidptr
+fn C.free(ptr voidptr)
 
 struct Elf64_Ehdr {
 	e_ident     [16]u8
@@ -115,8 +116,20 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
 			unsafe {
 				name_ptr := &char(strtab.data) + sym.st_name
-				name := cstring_to_vstring(name_ptr)
-				if name == symbol_name || name.contains(symbol_name) {
+				name := name_ptr.vstring()
+				if name == symbol_name {
+					return sym.st_value
+				}
+			}
+		}
+	}
+
+	for sym in syms {
+		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
+			unsafe {
+				name_ptr := &char(strtab.data) + sym.st_name
+				name := name_ptr.vstring()
+				if name.contains(symbol_name) {
 					return sym.st_value
 				}
 			}
@@ -193,7 +206,7 @@ fn list_elf_symbols(file_path string) {
 		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
 			unsafe {
 				name_ptr := &char(strtab.data) + sym.st_name
-				name := cstring_to_vstring(name_ptr)
+				name := name_ptr.vstring()
 				println("  0x" + sym.st_value.hex_full() + " : " + name)
 			}
 		}
@@ -275,6 +288,12 @@ fn main() {
 	}
 
 	base_addr := get_base_address(os.file_name(lib_path))
+	if base_addr == 0 {
+		println("[-] Error: Base address not found.")
+		C.dlclose(handle)
+		return
+	}
+
 	offset := find_elf_symbol_offset(lib_path, sym_arg)
 
 	if offset == 0 {
@@ -405,7 +424,7 @@ fn main() {
 			if out_types[idx] == "int" {
 				println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (*&int(buf)).str())
 			} else if out_types[idx] == "string" {
-				println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + cstring_to_vstring(&char(buf)))
+				println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (&char(buf)).vstring())
 			}
 		}
 	}
