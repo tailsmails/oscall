@@ -69,7 +69,7 @@ oscall <lib_name_or_path> --list
 ## Practical Examples
 
 ### 1. Listing All Available Symbols in a Shared Library
-To scan and print the complete offset table of a library:
+To scan and print the complete offset table of a library (`apt install tsu` to use sudo or use su -c ...):
 ```bash
 sudo ./oscall libem_wifi_jni.so --list
 ```
