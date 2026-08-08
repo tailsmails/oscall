@@ -5,12 +5,16 @@ import strconv
 
 #flag -ldl
 #include <dlfcn.h>
+#include "helper.h"
 
 fn C.dlopen(filename &char, flags int) voidptr
 fn C.dlsym(handle voidptr, symbol &char) voidptr
 fn C.dlclose(handle voidptr) int
 fn C.memcpy(dest voidptr, src voidptr, n int) voidptr
 fn C.free(ptr voidptr)
+fn C.signal(sig int, handler voidptr) voidptr
+fn C.v_segfault_handler(sig int)
+fn C.safe_sigsetjmp() int
 
 struct Elf64_Ehdr {
 	e_ident     [16]u8
@@ -52,18 +56,35 @@ struct Elf64_Sym {
 }
 
 fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
+	if !os.exists(file_path) { return 0 }
+	file_size := os.file_size(file_path)
+	if file_size < i64(sizeof(Elf64_Ehdr)) { return 0 }
+
 	mut file := os.open(file_path) or { return 0 }
 	defer { file.close() }
 
 	mut ehdr := Elf64_Ehdr{}
 	ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
 	if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return 0 }
+	if ehdr_bytes[0] != 0x7f || ehdr_bytes[1] != `E` || ehdr_bytes[2] != `L` || ehdr_bytes[3] != `F` {
+		return 0
+	}
+	if ehdr_bytes[4] != 2 {
+		return 0
+	}
 	unsafe {
 		C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
 	}
 
 	sh_num := ehdr.e_shnum
 	sh_entsize := ehdr.e_shentsize
+	if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
+		return 0
+	}
+	if ehdr.e_shoff >= u64(file_size) || u64(sh_num) * u64(sh_entsize) > u64(file_size) - ehdr.e_shoff {
+		return 0
+	}
+
 	shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
 	if shdrs_bytes.len < int(sh_num * sh_entsize) { return 0 }
 
@@ -96,11 +117,28 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 	if sym_shdr_idx == -1 || str_shdr_idx == -1 {
 		return 0
 	}
+	if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
+		return 0
+	}
 
 	sym_shdr := shdrs[sym_shdr_idx]
 	str_shdr := shdrs[str_shdr_idx]
 
+	if sym_shdr.sh_entsize < sizeof(Elf64_Sym) || sym_shdr.sh_entsize == 0 {
+		return 0
+	}
+	if sym_shdr.sh_offset >= u64(file_size) || sym_shdr.sh_size > u64(file_size) - sym_shdr.sh_offset {
+		return 0
+	}
+	if str_shdr.sh_offset >= u64(file_size) || str_shdr.sh_size > u64(file_size) - str_shdr.sh_offset {
+		return 0
+	}
+
 	sym_count := sym_shdr.sh_size / sym_shdr.sh_entsize
+	if sym_count == 0 || sym_count > 1000000 {
+		return 0
+	}
+
 	syms_bytes := file.read_bytes_at(int(sym_shdr.sh_size), sym_shdr.sh_offset)
 	if syms_bytes.len < int(sym_shdr.sh_size) { return 0 }
 
@@ -114,24 +152,26 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 
 	for sym in syms {
 		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
-			unsafe {
-				name_ptr := &char(strtab.data) + sym.st_name
-				name := name_ptr.vstring()
-				if name == symbol_name {
-					return sym.st_value
-				}
+			mut end := int(sym.st_name)
+			for end < strtab.len && strtab[end] != 0 {
+				end++
+			}
+			name := strtab[int(sym.st_name)..end].bytestr()
+			if name == symbol_name {
+				return sym.st_value
 			}
 		}
 	}
 
 	for sym in syms {
 		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
-			unsafe {
-				name_ptr := &char(strtab.data) + sym.st_name
-				name := name_ptr.vstring()
-				if name.contains(symbol_name) {
-					return sym.st_value
-				}
+			mut end := int(sym.st_name)
+			for end < strtab.len && strtab[end] != 0 {
+				end++
+			}
+			name := strtab[int(sym.st_name)..end].bytestr()
+			if name.contains(symbol_name) {
+				return sym.st_value
 			}
 		}
 	}
@@ -140,18 +180,35 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 }
 
 fn list_elf_symbols(file_path string) {
+	if !os.exists(file_path) { return }
+	file_size := os.file_size(file_path)
+	if file_size < i64(sizeof(Elf64_Ehdr)) { return }
+
 	mut file := os.open(file_path) or { return }
 	defer { file.close() }
 
 	mut ehdr := Elf64_Ehdr{}
 	ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
 	if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return }
+	if ehdr_bytes[0] != 0x7f || ehdr_bytes[1] != `E` || ehdr_bytes[2] != `L` || ehdr_bytes[3] != `F` {
+		return
+	}
+	if ehdr_bytes[4] != 2 {
+		return
+	}
 	unsafe {
 		C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
 	}
 
 	sh_num := ehdr.e_shnum
 	sh_entsize := ehdr.e_shentsize
+	if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
+		return
+	}
+	if ehdr.e_shoff >= u64(file_size) || u64(sh_num) * u64(sh_entsize) > u64(file_size) - ehdr.e_shoff {
+		return
+	}
+
 	shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
 	if shdrs_bytes.len < int(sh_num * sh_entsize) { return }
 
@@ -185,11 +242,29 @@ fn list_elf_symbols(file_path string) {
 		println("[-] Error: No symbol table found in ELF.")
 		return
 	}
+	if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
+		println("[-] Error: Invalid section indices in ELF headers.")
+		return
+	}
 
 	sym_shdr := shdrs[sym_shdr_idx]
 	str_shdr := shdrs[str_shdr_idx]
 
+	if sym_shdr.sh_entsize < sizeof(Elf64_Sym) || sym_shdr.sh_entsize == 0 {
+		return
+	}
+	if sym_shdr.sh_offset >= u64(file_size) || sym_shdr.sh_size > u64(file_size) - sym_shdr.sh_offset {
+		return
+	}
+	if str_shdr.sh_offset >= u64(file_size) || str_shdr.sh_size > u64(file_size) - str_shdr.sh_offset {
+		return
+	}
+
 	sym_count := sym_shdr.sh_size / sym_shdr.sh_entsize
+	if sym_count == 0 || sym_count > 1000000 {
+		return
+	}
+
 	syms_bytes := file.read_bytes_at(int(sym_shdr.sh_size), sym_shdr.sh_offset)
 	if syms_bytes.len < int(sym_shdr.sh_size) { return }
 
@@ -204,11 +279,12 @@ fn list_elf_symbols(file_path string) {
 	println("[+] Total symbols found: " + sym_count.str())
 	for sym in syms {
 		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
-			unsafe {
-				name_ptr := &char(strtab.data) + sym.st_name
-				name := name_ptr.vstring()
-				println("  0x" + sym.st_value.hex_full() + " : " + name)
+			mut end := int(sym.st_name)
+			for end < strtab.len && strtab[end] != 0 {
+				end++
 			}
+			name := strtab[int(sym.st_name)..end].bytestr()
+			println("  0x" + sym.st_value.hex_full() + " : " + name)
 		}
 	}
 }
@@ -218,7 +294,7 @@ fn get_base_address(lib_name string) u64 {
 	for line in lines {
 		if line.contains(lib_name) {
 			parts := line.split("-")
-			if parts.len > 0 {
+			if parts.len >= 2 {
 				return strconv.parse_uint(parts[0], 16, 64) or { 0 }
 			}
 		}
@@ -325,20 +401,24 @@ fn main() {
 		} else if arg_str == "o:int" {
 			unsafe {
 				mut local_buf := &int(malloc(int(sizeof(int))))
-				*local_buf = 0
-				args << voidptr(local_buf)
-				out_buffers << voidptr(local_buf)
-				out_types << "int"
-				out_indices << (i - 3)
+				if !isnil(local_buf) {
+					*local_buf = 0
+					args << voidptr(local_buf)
+					out_buffers << voidptr(local_buf)
+					out_types << "int"
+					out_indices << (i - 3)
+				}
 			}
 		} else if arg_str == "o:string" {
 			unsafe {
 				mut local_buf := malloc(512)
-				*&u8(local_buf) = 0
-				args << voidptr(local_buf)
-				out_buffers << voidptr(local_buf)
-				out_types << "string"
-				out_indices << (i - 3)
+				if !isnil(local_buf) {
+					*&u8(local_buf) = 0
+					args << voidptr(local_buf)
+					out_buffers << voidptr(local_buf)
+					out_types << "string"
+					out_indices << (i - 3)
+				}
 			}
 		} else {
 			args << voidptr(arg_str.int())
@@ -346,85 +426,99 @@ fn main() {
 	}
 
 	println("[!] Executing function call...")
+	mut success := false
 	unsafe {
-		match args.len {
-			0 {
-				func := Call0(target_addr)
-				res := func()
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+		C.signal(11, voidptr(C.v_segfault_handler))
+		C.signal(7, voidptr(C.v_segfault_handler))
+
+		if C.safe_sigsetjmp() == 0 {
+			match args.len {
+				0 {
+					func := Call0(target_addr)
+					res := func()
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				1 {
+					func := Call1(target_addr)
+					res := func(args[0])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				2 {
+					func := Call2(target_addr)
+					res := func(args[0], args[1])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				3 {
+					func := Call3(target_addr)
+					res := func(args[0], args[1], args[2])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				4 {
+					func := Call4(target_addr)
+					res := func(args[0], args[1], args[2], args[3])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				5 {
+					func := Call5(target_addr)
+					res := func(args[0], args[1], args[2], args[3], args[4])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				6 {
+					func := Call6(target_addr)
+					res := func(args[0], args[1], args[2], args[3], args[4], args[5])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				7 {
+					func := Call7(target_addr)
+					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				8 {
+					func := Call8(target_addr)
+					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				9 {
+					func := Call9(target_addr)
+					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				10 {
+					func := Call10(target_addr)
+					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				11 {
+					func := Call11(target_addr)
+					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				12 {
+					func := Call12(target_addr)
+					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
+				}
+				else {
+					println("[-] Error: Unsupported number of arguments.")
+				}
 			}
-			1 {
-				func := Call1(target_addr)
-				res := func(args[0])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			2 {
-				func := Call2(target_addr)
-				res := func(args[0], args[1])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			3 {
-				func := Call3(target_addr)
-				res := func(args[0], args[1], args[2])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			4 {
-				func := Call4(target_addr)
-				res := func(args[0], args[1], args[2], args[3])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			5 {
-				func := Call5(target_addr)
-				res := func(args[0], args[1], args[2], args[3], args[4])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			6 {
-				func := Call6(target_addr)
-				res := func(args[0], args[1], args[2], args[3], args[4], args[5])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			7 {
-				func := Call7(target_addr)
-				res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			8 {
-				func := Call8(target_addr)
-				res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			9 {
-				func := Call9(target_addr)
-				res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			10 {
-				func := Call10(target_addr)
-				res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			11 {
-				func := Call11(target_addr)
-				res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			12 {
-				func := Call12(target_addr)
-				res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
-				println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-			}
-			else {
-				println("[-] Error: Unsupported number of arguments.")
-			}
+			success = true
+		} else {
+			println("[-] Error: Execution was aborted due to a Segmentation Fault (SIGSEGV/SIGBUS).")
 		}
+
+		C.signal(11, voidptr(0))
+		C.signal(7, voidptr(0))
 	}
 
-	for idx, buf in out_buffers {
-		unsafe {
-			if out_types[idx] == "int" {
-				println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (*&int(buf)).str())
-			} else if out_types[idx] == "string" {
-				println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (&char(buf)).vstring())
+	if success {
+		for idx, buf in out_buffers {
+			unsafe {
+				if out_types[idx] == "int" {
+					println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (*&int(buf)).str())
+				} else if out_types[idx] == "string" {
+					println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (&char(buf)).vstring())
+				}
 			}
 		}
 	}
