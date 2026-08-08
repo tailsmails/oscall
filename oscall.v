@@ -320,18 +320,22 @@ fn main() {
 	if os.args.len < 3 {
 		println("Usage:")
 		println("  " + os.args[0] + " <lib_name_or_path> <symbol_name_or_substring> [arg1] [arg2] [arg3]...")
+		println("  " + os.args[0] + " <lib_name_or_path> <symbol_name> [args] :: <symbol_name_2> [args] :: ...")
 		println("  " + os.args[0] + " <lib_name_or_path> --list")
 		println("Arg prefixes:")
-		println("  123      -> Raw integer")
-		println("  s:text   -> Pointer to null-terminated C-string")
-		println("  p:0x123  -> Hex pointer address")
-		println("  o:int    -> Allocate local int buffer, print output")
-		println("  o:string -> Allocate local 512-byte string buffer, print output")
+		println("  123             -> Raw integer")
+		println("  s:text          -> Pointer to null-terminated C-string")
+		println("  p:0x123         -> Hex pointer address")
+		println("  alloc:name:size -> Allocate a local buffer of `size` bytes on heap and register it as `name`")
+		println("  p:name          -> Pass pointer of registered buffer `name` as argument")
+		println("  $1, $2...       -> Pass raw return value of Step 1, Step 2, etc.")
+		println("  p:$1, p:$2...   -> Pass pointer return value of Step 1, Step 2, etc.")
+		println("  o:int           -> Allocate local int buffer, print output")
+		println("  o:string        -> Allocate local 512-byte string buffer, print output")
 		return
 	}
 
 	mut lib_arg := os.args[1]
-	sym_arg := os.args[2]
 
 	mut lib_path := lib_arg
 	if !lib_path.starts_with("/") {
@@ -352,7 +356,7 @@ fn main() {
 		return
 	}
 
-	if sym_arg == "--list" || sym_arg == "-l" {
+	if os.args[2] == "--list" || os.args[2] == "-l" {
 		list_elf_symbols(lib_path)
 		return
 	}
@@ -370,157 +374,211 @@ fn main() {
 		return
 	}
 
-	offset := find_elf_symbol_offset(lib_path, sym_arg)
-
-	if offset == 0 {
-		println("[-] Symbol not found in ELF headers.")
-		C.dlclose(handle)
-		return
+	mut steps := [][]string{}
+	mut current_step := []string{}
+	for i := 2; i < os.args.len; i++ {
+		if os.args[i] == "::" {
+			if current_step.len > 0 {
+				steps << current_step
+				current_step = []string{}
+			}
+		} else {
+			current_step << os.args[i]
+		}
+	}
+	if current_step.len > 0 {
+		steps << current_step
 	}
 
-	println("[+] Library Base Address: 0x" + base_addr.hex_full())
-	println("[+] Symbol Offset: 0x" + offset.hex_full())
+	mut named_buffers := map[string]voidptr{}
+	mut step_returns := []voidptr{}
 
-	target_addr := voidptr(base_addr + offset)
-	println("[+] Target Memory Address: " + target_addr.str())
+	for step_idx, step in steps {
+		if step.len == 0 { continue }
+		sym_name := step[0]
+		println("\n[!] === Executing Step " + (step_idx + 1).str() + " (" + sym_name + ") ===")
 
-	mut args := []voidptr{}
-	mut out_buffers := []voidptr{}
-	mut out_types := []string{}
-	mut out_indices := []int{}
+		offset := find_elf_symbol_offset(lib_path, sym_name)
+		if offset == 0 {
+			println("[-] Error: Symbol not found in ELF headers: " + sym_name)
+			break
+		}
 
-	for i := 3; i < os.args.len; i++ {
-		arg_str := os.args[i]
-		if arg_str.starts_with("s:") {
-			val_str := arg_str.substr(2, arg_str.len)
-			args << voidptr(val_str.str)
-		} else if arg_str.starts_with("p:") {
-			val_str := arg_str.substr(2, arg_str.len)
-			hex_val := strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
-			args << voidptr(hex_val)
-		} else if arg_str == "o:int" {
-			unsafe {
-				mut local_buf := &int(malloc(int(sizeof(int))))
-				if !isnil(local_buf) {
-					*local_buf = 0
-					args << voidptr(local_buf)
-					out_buffers << voidptr(local_buf)
-					out_types << "int"
-					out_indices << (i - 3)
+		println("[+] Symbol Offset: 0x" + offset.hex_full())
+		target_addr := voidptr(base_addr + offset)
+		println("[+] Target Memory Address: " + target_addr.str())
+
+		mut args := []voidptr{}
+		mut out_buffers := []voidptr{}
+		mut out_types := []string{}
+		mut out_indices := []int{}
+
+		for i := 1; i < step.len; i++ {
+			arg_str := step[i]
+			if arg_str.starts_with("alloc:") {
+				parts := arg_str.split(":")
+				if parts.len >= 3 {
+					name := parts[1]
+					size := parts[2].int()
+					if name in named_buffers {
+						args << (named_buffers[name] or { voidptr(0) })
+					} else {
+						unsafe {
+							ptr := malloc(size)
+							named_buffers[name] = ptr
+							args << ptr
+						}
+					}
+				} else {
+					args << voidptr(0)
 				}
+			} else if arg_str.starts_with("p:") {
+				val_str := arg_str.substr(2, arg_str.len)
+				if val_str in named_buffers {
+					args << (named_buffers[val_str] or { voidptr(0) })
+				} else if val_str.starts_with("$") {
+					ref_idx := val_str.substr(1, val_str.len).int() - 1
+					if ref_idx >= 0 && ref_idx < step_returns.len {
+						args << step_returns[ref_idx]
+					} else {
+						args << voidptr(0)
+					}
+				} else {
+					hex_val := strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
+					args << voidptr(hex_val)
+				}
+			} else if arg_str.starts_with("$") {
+				ref_idx := arg_str.substr(1, arg_str.len).int() - 1
+				if ref_idx >= 0 && ref_idx < step_returns.len {
+					args << step_returns[ref_idx]
+				} else {
+					args << voidptr(0)
+				}
+			} else if arg_str == "o:int" {
+				unsafe {
+					mut local_buf := &int(malloc(int(sizeof(int))))
+					if !isnil(local_buf) {
+						*local_buf = 0
+						args << voidptr(local_buf)
+						out_buffers << voidptr(local_buf)
+						out_types << "int"
+						out_indices << (i - 1)
+					}
+				}
+			} else if arg_str == "o:string" {
+				unsafe {
+					mut local_buf := malloc(512)
+					if !isnil(local_buf) {
+						*&u8(local_buf) = 0
+						args << voidptr(local_buf)
+						out_buffers << voidptr(local_buf)
+						out_types << "string"
+						out_indices << (i - 1)
+					}
+				}
+			} else if arg_str.starts_with("s:") {
+				val_str := arg_str.substr(2, arg_str.len)
+				args << voidptr(val_str.str)
+			} else {
+				args << voidptr(arg_str.int())
 			}
-		} else if arg_str == "o:string" {
-			unsafe {
-				mut local_buf := malloc(512)
-				if !isnil(local_buf) {
-					*&u8(local_buf) = 0
-					args << voidptr(local_buf)
-					out_buffers << voidptr(local_buf)
-					out_types << "string"
-					out_indices << (i - 3)
+		}
+
+		println("[!] Calling function with " + args.len.str() + " args...")
+		mut success := false
+		mut step_res := voidptr(0)
+
+		unsafe {
+			C.signal(11, voidptr(C.v_segfault_handler))
+			C.signal(7, voidptr(C.v_segfault_handler))
+
+			if C.safe_sigsetjmp() == 0 {
+				match args.len {
+					0 {
+						func := Call0(target_addr)
+						step_res = func()
+					}
+					1 {
+						func := Call1(target_addr)
+						step_res = func(args[0])
+					}
+					2 {
+						func := Call2(target_addr)
+						step_res = func(args[0], args[1])
+					}
+					3 {
+						func := Call3(target_addr)
+						step_res = func(args[0], args[1], args[2])
+					}
+					4 {
+						func := Call4(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3])
+					}
+					5 {
+						func := Call5(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4])
+					}
+					6 {
+						func := Call6(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5])
+					}
+					7 {
+						func := Call7(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+					}
+					8 {
+						func := Call8(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+					}
+					9 {
+						func := Call9(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
+					}
+					10 {
+						func := Call10(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
+					}
+					11 {
+						func := Call11(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
+					}
+					12 {
+						func := Call12(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+					}
+					else {
+						println("[-] Error: Unsupported number of arguments.")
+					}
+				}
+				success = true
+				println("[+] Execution finished. Return Code: 0x" + u64(step_res).hex_full())
+			} else {
+				println("[-] Error: Execution was aborted due to a Segmentation Fault (SIGSEGV/SIGBUS).")
+			}
+
+			C.signal(11, voidptr(0))
+			C.signal(7, voidptr(0))
+		}
+
+		step_returns << step_res
+
+		if success {
+			for idx, buf in out_buffers {
+				unsafe {
+					if out_types[idx] == "int" {
+						println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (*&int(buf)).str())
+					} else if out_types[idx] == "string" {
+						println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (&char(buf)).vstring())
+					}
 				}
 			}
 		} else {
-			args << voidptr(arg_str.int())
+			break
 		}
 	}
 
-	println("[!] Executing function call...")
-	mut success := false
-	unsafe {
-		C.signal(11, voidptr(C.v_segfault_handler))
-		C.signal(7, voidptr(C.v_segfault_handler))
-
-		if C.safe_sigsetjmp() == 0 {
-			match args.len {
-				0 {
-					func := Call0(target_addr)
-					res := func()
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				1 {
-					func := Call1(target_addr)
-					res := func(args[0])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				2 {
-					func := Call2(target_addr)
-					res := func(args[0], args[1])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				3 {
-					func := Call3(target_addr)
-					res := func(args[0], args[1], args[2])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				4 {
-					func := Call4(target_addr)
-					res := func(args[0], args[1], args[2], args[3])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				5 {
-					func := Call5(target_addr)
-					res := func(args[0], args[1], args[2], args[3], args[4])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				6 {
-					func := Call6(target_addr)
-					res := func(args[0], args[1], args[2], args[3], args[4], args[5])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				7 {
-					func := Call7(target_addr)
-					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				8 {
-					func := Call8(target_addr)
-					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				9 {
-					func := Call9(target_addr)
-					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				10 {
-					func := Call10(target_addr)
-					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				11 {
-					func := Call11(target_addr)
-					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				12 {
-					func := Call12(target_addr)
-					res := func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
-					println("[+] Execution finished. Return Code: 0x" + u64(res).hex_full())
-				}
-				else {
-					println("[-] Error: Unsupported number of arguments.")
-				}
-			}
-			success = true
-		} else {
-			println("[-] Error: Execution was aborted due to a Segmentation Fault (SIGSEGV/SIGBUS).")
-		}
-
-		C.signal(11, voidptr(0))
-		C.signal(7, voidptr(0))
-	}
-
-	if success {
-		for idx, buf in out_buffers {
-			unsafe {
-				if out_types[idx] == "int" {
-					println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (*&int(buf)).str())
-				} else if out_types[idx] == "string" {
-					println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (&char(buf)).vstring())
-				}
-			}
-		}
+	for _, ptr in named_buffers {
+		unsafe { free(ptr) }
 	}
 
 	C.dlclose(handle)
