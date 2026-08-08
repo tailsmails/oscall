@@ -1,6 +1,6 @@
 # oscall
 
-A native, low-level CLI utility written in V for inspecting, loading, and dynamically executing arbitrary C/C++ functions within shared libraries (`.so`) on Linux and Android environments.
+A native, low-level CLI utility written in V for inspecting, loading, and dynamically executing arbitrary C/C++ functions within shared libraries (`.so`) on Linux and Android (both 32-bit and 64-bit) environments.
 
 `oscall` is designed for platform developers, hardware diagnostic engineers, and security researchers who need to interact with internal, stripped, or dynamically registered vendor APIs directly from the command line without compiling custom wrapping code.
 
@@ -13,19 +13,20 @@ A native, low-level CLI utility written in V for inspecting, loading, and dynami
 Under the hood, the execution cycle follows these steps:
 1. **Dynamic Loading:** The target library is mapped into the memory space of `oscall` using POSIX dynamic linking interfaces.
 2. **Memory Map Parsing:** The utility reads `/proc/self/maps` of its own active process to resolve the base virtual memory load address of the target library.
-3. **ELF Parsing:** It opens the physical binary, parses the ELF64 headers on disk, and traverses the Section Headers.
+3. **Architecture Detection & ELF Parsing:** It reads the ELF class identifier from the physical binary, dynamically adapts to parse either ELF32 or ELF64 structures, and traverses the Section Headers.
 4. **Symbol Table Fallback:** It scans the static symbol table (`.symtab`). If the binary has been stripped, it automatically falls back to parsing the dynamic symbol table (`.dynsym`).
 5. **Absolute Pointer Resolution:** By matching the target symbol, it extracts the relative file offset and combines it with the base memory map address (`Base Address + Offset`), bypassing `dlsym` limitations on unexported or local C++ symbols (e.g., `_ZL` static functions).
 6. **Execution Pipeline Chaining:** Using the execution delimiter (`::`), the utility decomposes the CLI instructions into sequential steps, keeping the runtime environment intact.
-7. **Dynamic ABI Casting:** Based on user-provided CLI arguments, it dynamically casts the absolute memory pointer to a corresponding function signature (from 0 to 12 arguments) and triggers execution.
+7. **Dynamic ABI Casting & Output Formatting:** Based on user-provided CLI arguments, it dynamically casts the absolute memory pointer to a corresponding function signature (from 0 to 12 arguments), triggers execution, and intercepts the return value to cast it into the specified output format.
 8. **State Preservation:** Registers named memory heap buffers across execution steps, allowing consecutive functions to reference and manipulate persistent objects.
 
 ---
 
 ## Key Features
 
-- **ELF64 Parser:** Built-in low-level ELF parser supporting symbol matching and extraction from `.symtab` and `.dynsym`.
-- **Dynamic ABI Binder:** Call delegates supporting up to 12 arguments mapping to the standard ARM64/x86_64 calling conventions.
+- **Multi-Arch ELF Parser:** Built-in low-level ELF parser supporting both 32-bit (ELF32) and 64-bit (ELF64) symbol matching and extraction from `.symtab` and `.dynsym`.
+- **Dynamic ABI Binder:** Call delegates supporting up to 12 arguments mapping to standard ARM/ARM64 and x86/x86_64 calling conventions.
+- **On-the-fly Return Formatting:** Casts and prints return values dynamically using runtime format indicators (`->int`, `->string`, `->bool`).
 - **Symbol Enumeration:** Quick directory/listing of all exported and internal symbols of any mapped library.
 - **Chained Execution Pipeline:** Sequential execution of multiple native functions in a single process run using the `::` delimiter.
 - **Stateful Memory Binding:** Persistent heap allocation (`alloc:`) and reference tracking (`p:`) to simulate complex object initialization and lifecycle management.
@@ -74,44 +75,68 @@ oscall <lib_name_or_path> --list
 | `o:int` | `o:int` | Allocates a local `int*` buffer, passes its address, and prints the updated value post-execution. |
 | `o:string` | `o:string`| Allocates a 512-byte `char*` buffer, passes its address, and prints the populated string post-execution. |
 
+### Return Value Formatting
+
+To interpret and display the return value of a step, append one of the following formatting flags to the arguments. 
+
+*(Note: Always wrap formatting flags in quotes like `"->string"` or escape them as `-\>string` to prevent the shell from interpreting the `>` character as an output redirection).*
+
+| Flag | Example | Description |
+| :--- | :--- | :--- |
+| `"->hex"` | `"->hex"` | Interprets the return value as a raw hexadecimal address/value (Default). |
+| `"->string"` | `"->string"` | Safely dereferences the return pointer and prints it as a null-terminated C-string. |
+| `"->int"` | `"->int"` | Interprets the return value as a signed 64-bit integer (`int64`). |
+| `"->bool"` | `"->bool"` | Evaluates the return value as a boolean (`true`/`false`). |
+
 ---
 
 ## Practical Examples
 
 ### 1. Listing All Available Symbols in a Shared Library
-To scan and print the complete offset table of a library (`apt install tsu` to use sudo or use su -c ...):
+To scan and print the complete offset table of a library:
 ```bash
-sudo ./oscall libem_wifi_jni.so --list
+./oscall libc.so --list
 ```
 
-### 2. Reading Hardware Capability (Output Reference)
-To call `android::CMT66xx::HQA_GetChipCapability(int* out_capability)` which expects a null class instance (`this`) as the first argument, and writes its output to the second:
+### 2. Basic Arithmetic and Value Interpretation
+To call a function and format the return value directly as a signed integer:
 ```bash
-sudo ./oscall libem_wifi_jni.so HQA_GetChipCapability p:0x0 o:int
+./oscall libc.so geteuid "->int"
 ```
 **Output:**
 ```text
-[+] Library Base Address: 0x0000007a4160b000
-[+] Symbol Offset: 0x00000000000164b0
-[+] Target Memory Address: 0x7a416214b0
-[!] Executing function call...
-[+] Output buffer at Argument #1 updated to: 15
+[!] === Executing Step 1 (geteuid) ===
+[+] Symbol Offset: 0x00000000000e56d0
+[+] Target Memory Address: 0x7538f256d0
+[!] Calling function with 0 args...
+[+] Return (Int): 10327
 ```
 
-### 3. Extracting Firmware Version string (Text Buffer Output)
-To call `android::CAdapter::getFwManifestVersion(char* out_version)` which writes the firmware version to a string buffer:
+### 3. Resolving Environment Strings (Pointer Dereferencing)
+To call `getenv("PATH")` which returns a memory address containing a string, and safely print the referenced string:
 ```bash
-sudo ./oscall libem_wifi_jni.so getFwManifestVersion p:0x0 o:string
+./oscall libc.so getenv s:PATH "->string"
+```
+**Output:**
+```text
+[!] === Executing Step 1 (getenv) ===
+[+] Symbol Offset: 0x00000000000db4a0
+[+] Target Memory Address: 0x7538f1b4a0
+[!] Calling function with 1 args...
+[+] Return (String): /sbin:/vendor/bin:/system/sbin:/system/bin
 ```
 
-### 4. Stateful C++ Class Instantiation and Method Invocation (Chained Call)
-To call C++ non-static member functions, you can allocate memory for the object, invoke the constructor to initialize it, and then call member functions by passing the initialized pointer as `this` (`x0` register) in a single run:
+### 4. Reading System Parameters (Output Reference Buffer)
+To call functions that expect an allocated structure or pointer to write their output directly into:
 ```bash
-sudo ./oscall libem_wifi_jni.so _ZN7android7CMT66xxC1Ev alloc:my_chip:1024 :: _ZN7android7CMT66xx18HQA_DBDCStartRXExtEiiii p:my_chip 1 2 3 4
+./oscall libc.so gethostname o:string 512
 ```
-**Execution Sequence:**
-1. **Step 1:** Allocates `1024` bytes on the heap (registered as `my_chip`) and calls the constructor `android::CMT66xx::CMT66xx()` with `my_chip` as its implicit `this` pointer to initialize the class in memory.
-2. **Step 2:** Resolves the offset of `HQA_DBDCStartRXExt` and executes it, passing the initialized `my_chip` pointer as the first argument, followed by the remaining parameters.
+
+### 5. Stateful C++ Class Instantiation and Method Invocation (Chained Call)
+To call C++ non-static member functions, allocate memory for the object, invoke the constructor to initialize it, and then call member functions by passing the initialized pointer as `this` (`x0` register) in a single run:
+```bash
+./oscall libfoo.so _ZN3FooC1Ev alloc:my_obj:512 :: _ZN3Foo7executeEii p:my_obj 10 20
+```
 
 ---
 
