@@ -16,6 +16,45 @@ fn C.signal(sig int, handler voidptr) voidptr
 fn C.v_segfault_handler(sig int)
 fn C.safe_sigsetjmp() int
 
+struct Elf32_Ehdr {
+	e_ident     [16]u8
+	e_type      u16
+	e_machine   u16
+	e_version   u32
+	e_entry     u32
+	e_phoff     u32
+	e_shoff     u32
+	e_flags     u32
+	e_ehsize    u16
+	e_phentsize u16
+	e_phnum     u16
+	e_shentsize u16
+	e_shnum     u16
+	e_shstrndx  u16
+}
+
+struct Elf32_Shdr {
+	sh_name      u32
+	sh_type      u32
+	sh_flags     u32
+	sh_addr      u32
+	sh_offset    u32
+	sh_size      u32
+	sh_link      u32
+	sh_info      u32
+	sh_addralign u32
+	sh_entsize   u32
+}
+
+struct Elf32_Sym {
+	st_name  u32
+	st_value u32
+	st_size  u32
+	st_info  u8
+	st_other u8
+	st_shndx u16
+}
+
 struct Elf64_Ehdr {
 	e_ident     [16]u8
 	e_type      u16
@@ -58,120 +97,233 @@ struct Elf64_Sym {
 fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 	if !os.exists(file_path) { return 0 }
 	file_size := os.file_size(file_path)
-	if file_size < i64(sizeof(Elf64_Ehdr)) { return 0 }
+	if file_size < 52 { return 0 }
 
 	mut file := os.open(file_path) or { return 0 }
 	defer { file.close() }
 
-	mut ehdr := Elf64_Ehdr{}
-	ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
-	if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return 0 }
-	if ehdr_bytes[0] != 0x7f || ehdr_bytes[1] != `E` || ehdr_bytes[2] != `L` || ehdr_bytes[3] != `F` {
+	ident := file.read_bytes_at(16, 0)
+	if ident.len < 16 { return 0 }
+	if ident[0] != 0x7f || ident[1] != `E` || ident[2] != `L` || ident[3] != `F` {
 		return 0
 	}
-	if ehdr_bytes[4] != 2 {
-		return 0
-	}
-	unsafe {
-		C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
-	}
+	class := ident[4]
+	if class != 1 && class != 2 { return 0 }
 
-	sh_num := ehdr.e_shnum
-	sh_entsize := ehdr.e_shentsize
-	if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
-		return 0
-	}
-	if ehdr.e_shoff >= u64(file_size) || u64(sh_num) * u64(sh_entsize) > u64(file_size) - ehdr.e_shoff {
-		return 0
-	}
-
-	shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
-	if shdrs_bytes.len < int(sh_num * sh_entsize) { return 0 }
-
-	mut shdrs := []Elf64_Shdr{len: int(sh_num)}
-	unsafe {
-		C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
-	}
-
-	mut sym_shdr_idx := -1
-	mut str_shdr_idx := -1
-
-	for i, shdr in shdrs {
-		if shdr.sh_type == 2 {
-			sym_shdr_idx = i
-			str_shdr_idx = int(shdr.sh_link)
-			break
+	if class == 2 {
+		if file_size < i64(sizeof(Elf64_Ehdr)) { return 0 }
+		mut ehdr := Elf64_Ehdr{}
+		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
+		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return 0 }
+		unsafe {
+			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
 		}
-	}
 
-	if sym_shdr_idx == -1 {
+		sh_num := ehdr.e_shnum
+		sh_entsize := ehdr.e_shentsize
+		if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
+			return 0
+		}
+		if ehdr.e_shoff >= u64(file_size) || u64(sh_num) * u64(sh_entsize) > u64(file_size) - ehdr.e_shoff {
+			return 0
+		}
+
+		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return 0 }
+
+		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
+		unsafe {
+			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+		}
+
+		mut sym_shdr_idx := -1
+		mut str_shdr_idx := -1
+
 		for i, shdr in shdrs {
-			if shdr.sh_type == 11 {
+			if shdr.sh_type == 2 {
 				sym_shdr_idx = i
 				str_shdr_idx = int(shdr.sh_link)
 				break
 			}
 		}
-	}
 
-	if sym_shdr_idx == -1 || str_shdr_idx == -1 {
-		return 0
-	}
-	if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
-		return 0
-	}
-
-	sym_shdr := shdrs[sym_shdr_idx]
-	str_shdr := shdrs[str_shdr_idx]
-
-	if sym_shdr.sh_entsize < sizeof(Elf64_Sym) || sym_shdr.sh_entsize == 0 {
-		return 0
-	}
-	if sym_shdr.sh_offset >= u64(file_size) || sym_shdr.sh_size > u64(file_size) - sym_shdr.sh_offset {
-		return 0
-	}
-	if str_shdr.sh_offset >= u64(file_size) || str_shdr.sh_size > u64(file_size) - str_shdr.sh_offset {
-		return 0
-	}
-
-	sym_count := sym_shdr.sh_size / sym_shdr.sh_entsize
-	if sym_count == 0 || sym_count > 1000000 {
-		return 0
-	}
-
-	syms_bytes := file.read_bytes_at(int(sym_shdr.sh_size), sym_shdr.sh_offset)
-	if syms_bytes.len < int(sym_shdr.sh_size) { return 0 }
-
-	mut syms := []Elf64_Sym{len: int(sym_count)}
-	unsafe {
-		C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
-	}
-
-	strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
-	if strtab.len < int(str_shdr.sh_size) { return 0 }
-
-	for sym in syms {
-		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
-			mut end := int(sym.st_name)
-			for end < strtab.len && strtab[end] != 0 {
-				end++
-			}
-			name := strtab[int(sym.st_name)..end].bytestr()
-			if name == symbol_name {
-				return sym.st_value
+		if sym_shdr_idx == -1 {
+			for i, shdr in shdrs {
+				if shdr.sh_type == 11 {
+					sym_shdr_idx = i
+					str_shdr_idx = int(shdr.sh_link)
+					break
+				}
 			}
 		}
-	}
 
-	for sym in syms {
-		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
-			mut end := int(sym.st_name)
-			for end < strtab.len && strtab[end] != 0 {
-				end++
+		if sym_shdr_idx == -1 || str_shdr_idx == -1 {
+			return 0
+		}
+		if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
+			return 0
+		}
+
+		sym_shdr := shdrs[sym_shdr_idx]
+		str_shdr := shdrs[str_shdr_idx]
+
+		if sym_shdr.sh_entsize < sizeof(Elf64_Sym) || sym_shdr.sh_entsize == 0 {
+			return 0
+		}
+		if sym_shdr.sh_offset >= u64(file_size) || sym_shdr.sh_size > u64(file_size) - sym_shdr.sh_offset {
+			return 0
+		}
+		if str_shdr.sh_offset >= u64(file_size) || str_shdr.sh_size > u64(file_size) - str_shdr.sh_offset {
+			return 0
+		}
+
+		sym_count := sym_shdr.sh_size / sym_shdr.sh_entsize
+		if sym_count == 0 || sym_count > 1000000 {
+			return 0
+		}
+
+		syms_bytes := file.read_bytes_at(int(sym_shdr.sh_size), sym_shdr.sh_offset)
+		if syms_bytes.len < int(sym_shdr.sh_size) { return 0 }
+
+		mut syms := []Elf64_Sym{len: int(sym_count)}
+		unsafe {
+			C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
+		}
+
+		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
+		if strtab.len < int(str_shdr.sh_size) { return 0 }
+
+		for sym in syms {
+			if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
+				mut end := int(sym.st_name)
+				for end < strtab.len && strtab[end] != 0 {
+					end++
+				}
+				name := strtab[int(sym.st_name)..end].bytestr()
+				if name == symbol_name {
+					return sym.st_value
+				}
 			}
-			name := strtab[int(sym.st_name)..end].bytestr()
-			if name.contains(symbol_name) {
-				return sym.st_value
+		}
+
+		for sym in syms {
+			if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
+				mut end := int(sym.st_name)
+				for end < strtab.len && strtab[end] != 0 {
+					end++
+				}
+				name := strtab[int(sym.st_name)..end].bytestr()
+				if name.contains(symbol_name) {
+					return sym.st_value
+				}
+			}
+		}
+	} else {
+		if file_size < i64(sizeof(Elf32_Ehdr)) { return 0 }
+		mut ehdr := Elf32_Ehdr{}
+		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
+		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return 0 }
+		unsafe {
+			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf32_Ehdr)))
+		}
+
+		sh_num := ehdr.e_shnum
+		sh_entsize := ehdr.e_shentsize
+		if sh_entsize < sizeof(Elf32_Shdr) || sh_num == 0 || sh_num > 10000 {
+			return 0
+		}
+		if ehdr.e_shoff >= u32(file_size) || u32(sh_num) * u32(sh_entsize) > u32(file_size) - ehdr.e_shoff {
+			return 0
+		}
+
+		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return 0 }
+
+		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
+		unsafe {
+			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+		}
+
+		mut sym_shdr_idx := -1
+		mut str_shdr_idx := -1
+
+		for i, shdr in shdrs {
+			if shdr.sh_type == 2 {
+				sym_shdr_idx = i
+				str_shdr_idx = int(shdr.sh_link)
+				break
+			}
+		}
+
+		if sym_shdr_idx == -1 {
+			for i, shdr in shdrs {
+				if shdr.sh_type == 11 {
+					sym_shdr_idx = i
+					str_shdr_idx = int(shdr.sh_link)
+					break
+				}
+			}
+		}
+
+		if sym_shdr_idx == -1 || str_shdr_idx == -1 {
+			return 0
+		}
+		if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
+			return 0
+		}
+
+		sym_shdr := shdrs[sym_shdr_idx]
+		str_shdr := shdrs[str_shdr_idx]
+
+		if sym_shdr.sh_entsize < sizeof(Elf32_Sym) || sym_shdr.sh_entsize == 0 {
+			return 0
+		}
+		if sym_shdr.sh_offset >= u32(file_size) || sym_shdr.sh_size > u32(file_size) - sym_shdr.sh_offset {
+			return 0
+		}
+		if str_shdr.sh_offset >= u32(file_size) || str_shdr.sh_size > u32(file_size) - str_shdr.sh_offset {
+			return 0
+		}
+
+		sym_count := sym_shdr.sh_size / sym_shdr.sh_entsize
+		if sym_count == 0 || sym_count > 1000000 {
+			return 0
+		}
+
+		syms_bytes := file.read_bytes_at(int(sym_shdr.sh_size), sym_shdr.sh_offset)
+		if syms_bytes.len < int(sym_shdr.sh_size) { return 0 }
+
+		mut syms := []Elf32_Sym{len: int(sym_count)}
+		unsafe {
+			C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
+		}
+
+		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
+		if strtab.len < int(str_shdr.sh_size) { return 0 }
+
+		for sym in syms {
+			if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
+				mut end := int(sym.st_name)
+				for end < strtab.len && strtab[end] != 0 {
+					end++
+				}
+				name := strtab[int(sym.st_name)..end].bytestr()
+				if name == symbol_name {
+					return u64(sym.st_value)
+				}
+			}
+		}
+
+		for sym in syms {
+			if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
+				mut end := int(sym.st_name)
+				for end < strtab.len && strtab[end] != 0 {
+					end++
+				}
+				name := strtab[int(sym.st_name)..end].bytestr()
+				if name.contains(symbol_name) {
+					return u64(sym.st_value)
+				}
 			}
 		}
 	}
@@ -182,109 +334,210 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 fn list_elf_symbols(file_path string) {
 	if !os.exists(file_path) { return }
 	file_size := os.file_size(file_path)
-	if file_size < i64(sizeof(Elf64_Ehdr)) { return }
+	if file_size < 52 { return }
 
 	mut file := os.open(file_path) or { return }
 	defer { file.close() }
 
-	mut ehdr := Elf64_Ehdr{}
-	ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
-	if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return }
-	if ehdr_bytes[0] != 0x7f || ehdr_bytes[1] != `E` || ehdr_bytes[2] != `L` || ehdr_bytes[3] != `F` {
+	ident := file.read_bytes_at(16, 0)
+	if ident.len < 16 { return }
+	if ident[0] != 0x7f || ident[1] != `E` || ident[2] != `L` || ident[3] != `F` {
 		return
 	}
-	if ehdr_bytes[4] != 2 {
-		return
-	}
-	unsafe {
-		C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
-	}
+	class := ident[4]
+	if class != 1 && class != 2 { return }
 
-	sh_num := ehdr.e_shnum
-	sh_entsize := ehdr.e_shentsize
-	if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
-		return
-	}
-	if ehdr.e_shoff >= u64(file_size) || u64(sh_num) * u64(sh_entsize) > u64(file_size) - ehdr.e_shoff {
-		return
-	}
-
-	shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
-	if shdrs_bytes.len < int(sh_num * sh_entsize) { return }
-
-	mut shdrs := []Elf64_Shdr{len: int(sh_num)}
-	unsafe {
-		C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
-	}
-
-	mut sym_shdr_idx := -1
-	mut str_shdr_idx := -1
-
-	for i, shdr in shdrs {
-		if shdr.sh_type == 2 {
-			sym_shdr_idx = i
-			str_shdr_idx = int(shdr.sh_link)
-			break
+	if class == 2 {
+		if file_size < i64(sizeof(Elf64_Ehdr)) { return }
+		mut ehdr := Elf64_Ehdr{}
+		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
+		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return }
+		unsafe {
+			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
 		}
-	}
 
-	if sym_shdr_idx == -1 {
+		sh_num := ehdr.e_shnum
+		sh_entsize := ehdr.e_shentsize
+		if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
+			return
+		}
+		if ehdr.e_shoff >= u64(file_size) || u64(sh_num) * u64(sh_entsize) > u64(file_size) - ehdr.e_shoff {
+			return
+		}
+
+		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return }
+
+		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
+		unsafe {
+			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+		}
+
+		mut sym_shdr_idx := -1
+		mut str_shdr_idx := -1
+
 		for i, shdr in shdrs {
-			if shdr.sh_type == 11 {
+			if shdr.sh_type == 2 {
 				sym_shdr_idx = i
 				str_shdr_idx = int(shdr.sh_link)
 				break
 			}
 		}
-	}
 
-	if sym_shdr_idx == -1 || str_shdr_idx == -1 {
-		println("[-] Error: No symbol table found in ELF.")
-		return
-	}
-	if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
-		println("[-] Error: Invalid section indices in ELF headers.")
-		return
-	}
-
-	sym_shdr := shdrs[sym_shdr_idx]
-	str_shdr := shdrs[str_shdr_idx]
-
-	if sym_shdr.sh_entsize < sizeof(Elf64_Sym) || sym_shdr.sh_entsize == 0 {
-		return
-	}
-	if sym_shdr.sh_offset >= u64(file_size) || sym_shdr.sh_size > u64(file_size) - sym_shdr.sh_offset {
-		return
-	}
-	if str_shdr.sh_offset >= u64(file_size) || str_shdr.sh_size > u64(file_size) - str_shdr.sh_offset {
-		return
-	}
-
-	sym_count := sym_shdr.sh_size / sym_shdr.sh_entsize
-	if sym_count == 0 || sym_count > 1000000 {
-		return
-	}
-
-	syms_bytes := file.read_bytes_at(int(sym_shdr.sh_size), sym_shdr.sh_offset)
-	if syms_bytes.len < int(sym_shdr.sh_size) { return }
-
-	mut syms := []Elf64_Sym{len: int(sym_count)}
-	unsafe {
-		C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
-	}
-
-	strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
-	if strtab.len < int(str_shdr.sh_size) { return }
-
-	println("[+] Total symbols found: " + sym_count.str())
-	for sym in syms {
-		if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
-			mut end := int(sym.st_name)
-			for end < strtab.len && strtab[end] != 0 {
-				end++
+		if sym_shdr_idx == -1 {
+			for i, shdr in shdrs {
+				if shdr.sh_type == 11 {
+					sym_shdr_idx = i
+					str_shdr_idx = int(shdr.sh_link)
+					break
+				}
 			}
-			name := strtab[int(sym.st_name)..end].bytestr()
-			println("  0x" + sym.st_value.hex_full() + " : " + name)
+		}
+
+		if sym_shdr_idx == -1 || str_shdr_idx == -1 {
+			println("[-] Error: No symbol table found in ELF.")
+			return
+		}
+		if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
+			println("[-] Error: Invalid section indices in ELF headers.")
+			return
+		}
+
+		sym_shdr := shdrs[sym_shdr_idx]
+		str_shdr := shdrs[str_shdr_idx]
+
+		if sym_shdr.sh_entsize < sizeof(Elf64_Sym) || sym_shdr.sh_entsize == 0 {
+			return
+		}
+		if sym_shdr.sh_offset >= u64(file_size) || sym_shdr.sh_size > u64(file_size) - sym_shdr.sh_offset {
+			return
+		}
+		if str_shdr.sh_offset >= u64(file_size) || str_shdr.sh_size > u64(file_size) - str_shdr.sh_offset {
+			return
+		}
+
+		sym_count := sym_shdr.sh_size / sym_shdr.sh_entsize
+		if sym_count == 0 || sym_count > 1000000 {
+			return
+		}
+
+		syms_bytes := file.read_bytes_at(int(sym_shdr.sh_size), sym_shdr.sh_offset)
+		if syms_bytes.len < int(sym_shdr.sh_size) { return }
+
+		mut syms := []Elf64_Sym{len: int(sym_count)}
+		unsafe {
+			C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
+		}
+
+		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
+		if strtab.len < int(str_shdr.sh_size) { return }
+
+		println("[+] Total symbols found: " + sym_count.str())
+		for sym in syms {
+			if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
+				mut end := int(sym.st_name)
+				for end < strtab.len && strtab[end] != 0 {
+					end++
+				}
+				name := strtab[int(sym.st_name)..end].bytestr()
+				println("  0x" + sym.st_value.hex_full() + " : " + name)
+			}
+		}
+	} else {
+		if file_size < i64(sizeof(Elf32_Ehdr)) { return }
+		mut ehdr := Elf32_Ehdr{}
+		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
+		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return }
+		unsafe {
+			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf32_Ehdr)))
+		}
+
+		sh_num := ehdr.e_shnum
+		sh_entsize := ehdr.e_shentsize
+		if sh_entsize < sizeof(Elf32_Shdr) || sh_num == 0 || sh_num > 10000 {
+			return
+		}
+		if ehdr.e_shoff >= u32(file_size) || u32(sh_num) * u32(sh_entsize) > u32(file_size) - ehdr.e_shoff {
+			return
+		}
+
+		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return }
+
+		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
+		unsafe {
+			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+		}
+
+		mut sym_shdr_idx := -1
+		mut str_shdr_idx := -1
+
+		for i, shdr in shdrs {
+			if shdr.sh_type == 2 {
+				sym_shdr_idx = i
+				str_shdr_idx = int(shdr.sh_link)
+				break
+			}
+		}
+
+		if sym_shdr_idx == -1 {
+			for i, shdr in shdrs {
+				if shdr.sh_type == 11 {
+					sym_shdr_idx = i
+					str_shdr_idx = int(shdr.sh_link)
+					break
+				}
+			}
+		}
+
+		if sym_shdr_idx == -1 || str_shdr_idx == -1 {
+			println("[-] Error: No symbol table found in ELF.")
+			return
+		}
+		if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
+			println("[-] Error: Invalid section indices in ELF headers.")
+			return
+		}
+
+		sym_shdr := shdrs[sym_shdr_idx]
+		str_shdr := shdrs[str_shdr_idx]
+
+		if sym_shdr.sh_entsize < sizeof(Elf32_Sym) || sym_shdr.sh_entsize == 0 {
+			return
+		}
+		if sym_shdr.sh_offset >= u32(file_size) || sym_shdr.sh_size > u32(file_size) - sym_shdr.sh_offset {
+			return
+		}
+		if str_shdr.sh_offset >= u32(file_size) || str_shdr.sh_size > u32(file_size) - str_shdr.sh_offset {
+			return
+		}
+
+		sym_count := sym_shdr.sh_size / sym_shdr.sh_entsize
+		if sym_count == 0 || sym_count > 1000000 {
+			return
+		}
+
+		syms_bytes := file.read_bytes_at(int(sym_shdr.sh_size), sym_shdr.sh_offset)
+		if syms_bytes.len < int(sym_shdr.sh_size) { return }
+
+		mut syms := []Elf32_Sym{len: int(sym_count)}
+		unsafe {
+			C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
+		}
+
+		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
+		if strtab.len < int(str_shdr.sh_size) { return }
+
+		println("[+] Total symbols found: " + sym_count.str())
+		for sym in syms {
+			if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
+				mut end := int(sym.st_name)
+				for end < strtab.len && strtab[end] != 0 {
+					end++
+				}
+				name := strtab[int(sym.st_name)..end].bytestr()
+				println("  0x" + sym.st_value.hex() + " : " + name)
+			}
 		}
 	}
 }
@@ -332,6 +585,11 @@ fn main() {
 		println("  p:$1, p:$2...   -> Pass pointer return value of Step 1, Step 2, etc.")
 		println("  o:int           -> Allocate local int buffer, print output")
 		println("  o:string        -> Allocate local 512-byte string buffer, print output")
+		println("Return type format (append to arguments):")
+		println("  ->string        -> Print return value as C-string")
+		println("  ->int           -> Print return value as 64-bit integer")
+		println("  ->bool          -> Print return value as boolean")
+		println("  ->hex           -> Print return value as hex (default)")
 		return
 	}
 
@@ -412,9 +670,20 @@ fn main() {
 		mut out_buffers := []voidptr{}
 		mut out_types := []string{}
 		mut out_indices := []int{}
+		mut ret_format := "hex"
+		mut step_args := []string{}
 
 		for i := 1; i < step.len; i++ {
 			arg_str := step[i]
+			if arg_str.starts_with("->") {
+				ret_format = arg_str.substr(2, arg_str.len)
+			} else {
+				step_args << arg_str
+			}
+		}
+
+		for i := 0; i < step_args.len; i++ {
+			arg_str := step_args[i]
 			if arg_str.starts_with("alloc:") {
 				parts := arg_str.split(":")
 				if parts.len >= 3 {
@@ -462,7 +731,7 @@ fn main() {
 						args << voidptr(local_buf)
 						out_buffers << voidptr(local_buf)
 						out_types << "int"
-						out_indices << (i - 1)
+						out_indices << i
 					}
 				}
 			} else if arg_str == "o:string" {
@@ -473,7 +742,7 @@ fn main() {
 						args << voidptr(local_buf)
 						out_buffers << voidptr(local_buf)
 						out_types << "string"
-						out_indices << (i - 1)
+						out_indices << i
 					}
 				}
 			} else if arg_str.starts_with("s:") {
@@ -551,7 +820,24 @@ fn main() {
 					}
 				}
 				success = true
-				println("[+] Execution finished. Return Code: 0x" + u64(step_res).hex_full())
+				match ret_format {
+					"string", "str" {
+						if u64(step_res) != 0 {
+							println("[+] Return (String): " + (&char(step_res)).vstring())
+						} else {
+							println("[+] Return (String): NULL")
+						}
+					}
+					"int" {
+						println("[+] Return (Int): " + i64(step_res).str())
+					}
+					"bool" {
+						println("[+] Return (Bool): " + (u64(step_res) != 0).str())
+					}
+					else {
+						println("[+] Return (Hex): 0x" + u64(step_res).hex_full())
+					}
+				}
 			} else {
 				println("[-] Error: Execution was aborted due to a Segmentation Fault (SIGSEGV/SIGBUS).")
 			}
