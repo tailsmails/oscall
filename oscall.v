@@ -560,6 +560,11 @@ fn main() {
 			C.signal(7, voidptr(0))
 		}
 
+		if u64(step_res) == 0xffffffff || u64(step_res) == 0xffffffffffffffff {
+			println("[-] Error: Step " + (step_idx + 1).str() + " failed (returned -1). Aborting chain to prevent crash.")
+			break
+		}
+
 		step_returns << step_res
 
 		if success {
