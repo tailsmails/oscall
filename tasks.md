@@ -1,2 +1,2 @@
-- [ ] Support for Passing and Reading Complex Structures (C Structs)
+- [x] Support for Passing and Reading Complex Structures (C Structs)
 - [ ] Float type support
