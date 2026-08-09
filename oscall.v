@@ -11,10 +11,16 @@ fn C.dlopen(filename &char, flags int) voidptr
 fn C.dlsym(handle voidptr, symbol &char) voidptr
 fn C.dlclose(handle voidptr) int
 fn C.memcpy(dest voidptr, src voidptr, n int) voidptr
+fn C.memset(dest voidptr, val int, n int) voidptr
 fn C.free(ptr voidptr)
 fn C.signal(sig int, handler voidptr) voidptr
 fn C.v_segfault_handler(sig int)
 fn C.safe_sigsetjmp() int
+
+struct LocalBuffer {
+	ptr  voidptr
+	size int
+}
 
 struct Elf32_Ehdr {
 	e_ident     [16]u8
@@ -585,6 +591,11 @@ fn main() {
 		println("  p:$1, p:$2...   -> Pass pointer return value of Step 1, Step 2, etc.")
 		println("  o:int           -> Allocate local int buffer, print output")
 		println("  o:string        -> Allocate local 512-byte string buffer, print output")
+		println("Pseudo-steps (used as commands, e.g. cmd :: cmd):")
+		println("  alloc:name:size                 -> Pre-allocate a zero-initialized buffer on heap")
+		println("  set:name:offset:type:value      -> Write data into allocated buffer")
+		println("    Supported types: i8, i16, i32, i64, ptr, str, str_ptr")
+		println("  dump:name:size                  -> Print buffer hex/ASCII content safely with bounds check")
 		println("Return type format (append to arguments):")
 		println("  ->string        -> Print return value as C-string")
 		println("  ->int           -> Print return value as 64-bit integer")
@@ -648,13 +659,192 @@ fn main() {
 		steps << current_step
 	}
 
-	mut named_buffers := map[string]voidptr{}
+	mut named_buffers := map[string]LocalBuffer{}
 	mut step_returns := []voidptr{}
 
 	for step_idx, step in steps {
 		if step.len == 0 { continue }
 		sym_name := step[0]
 		println("\n[!] === Executing Step " + (step_idx + 1).str() + " (" + sym_name + ") ===")
+
+		if sym_name.starts_with("alloc:") {
+			parts := sym_name.split(":")
+			if parts.len >= 3 {
+				name := parts[1]
+				size := parts[2].int()
+				unsafe {
+					ptr := malloc(size)
+					if isnil(ptr) {
+						println("[-] Error: Allocation failed for `$name` ($size bytes)")
+						step_returns << voidptr(0)
+					} else {
+						C.memset(ptr, 0, size)
+						named_buffers[name] = LocalBuffer{ ptr: ptr, size: size }
+						println('[+] Pseudo-step: Pre-allocated buffer `' + name + '` (' + size.str() + ' bytes) at ' + ptr.str())
+						step_returns << ptr
+					}
+				}
+			} else {
+				println("[-] Error: Invalid alloc syntax. Use: alloc:name:size")
+				step_returns << voidptr(0)
+			}
+			continue
+		}
+
+		if sym_name.starts_with("set:") {
+			parts := sym_name.split(":")
+			if parts.len >= 5 {
+				buf_name := parts[1]
+				offset := parts[2].int()
+				val_type := parts[3]
+				val_str := parts[4..].join(":")
+
+				if buf_name in named_buffers {
+					buf_info := named_buffers[buf_name] or { LocalBuffer{} }
+					buf_ptr := buf_info.ptr
+					buf_size := buf_info.size
+					unsafe {
+						target_ptr := voidptr(u64(buf_ptr) + u64(offset))
+						
+						mut valid_write := false
+						match val_type {
+							"i8", "char", "u8" {
+								if offset + 1 <= buf_size {
+									val := val_str.int()
+									*&u8(target_ptr) = u8(val)
+									valid_write = true
+									println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into `' + buf_name + '` at offset ' + offset.str())
+								}
+							}
+							"i16", "short", "u16" {
+								if offset + 2 <= buf_size {
+									val := val_str.int()
+									*&u16(target_ptr) = u16(val)
+									valid_write = true
+									println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into `' + buf_name + '` at offset ' + offset.str())
+								}
+							}
+							"i32", "int", "u32" {
+								if offset + 4 <= buf_size {
+									val := val_str.int()
+									*&u32(target_ptr) = u32(val)
+									valid_write = true
+									println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into `' + buf_name + '` at offset ' + offset.str())
+								}
+							}
+							"i64", "long", "u64" {
+								if offset + 8 <= buf_size {
+									mut val := u64(0)
+									if val_str.starts_with("0x") {
+										val = strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
+									} else {
+										val = strconv.parse_uint(val_str, 10, 64) or { 0 }
+									}
+									*&u64(target_ptr) = val
+									valid_write = true
+									println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into `' + buf_name + '` at offset ' + offset.str())
+								}
+							}
+							"ptr" {
+								if offset + int(sizeof(voidptr)) <= buf_size {
+									mut ptr_val := voidptr(0)
+									if val_str in named_buffers {
+										ptr_val = (named_buffers[val_str] or { LocalBuffer{} }).ptr
+									} else if val_str.starts_with("0x") {
+										hex_val := strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
+										ptr_val = voidptr(hex_val)
+									} else if val_str.starts_with("$") {
+										ref_idx := val_str.substr(1, val_str.len).int() - 1
+										if ref_idx >= 0 && ref_idx < step_returns.len {
+											ptr_val = step_returns[ref_idx]
+										}
+									}
+									*&voidptr(target_ptr) = ptr_val
+									valid_write = true
+									println('[+] Pseudo-step: Written pointer (' + ptr_val.str() + ') into `' + buf_name + '` at offset ' + offset.str())
+								}
+							}
+							"str" {
+								str_len := val_str.len
+								if offset + str_len + 1 <= buf_size {
+									C.memcpy(target_ptr, val_str.str, str_len)
+									*&u8(voidptr(u64(target_ptr) + u64(str_len))) = 0
+									valid_write = true
+									println('[+] Pseudo-step: Copied raw string "' + val_str + '" into `' + buf_name + '` at offset ' + offset.str())
+								}
+							}
+							"str_ptr" {
+								if offset + int(sizeof(voidptr)) <= buf_size {
+									str_ptr := val_str.str
+									*&voidptr(target_ptr) = voidptr(str_ptr)
+									valid_write = true
+									println('[+] Pseudo-step: Written string pointer (' + voidptr(str_ptr).str() + ') to "' + val_str + '" into `' + buf_name + '` at offset ' + offset.str())
+								}
+							}
+							else {
+								println("[-] Error: Unsupported write type: $val_type")
+							}
+						}
+
+						if !valid_write {
+							println("[-] Error: Out of bounds write blocked on `$buf_name` at offset $offset for type $val_type. Buffer size is $buf_size.")
+						}
+					}
+				} else {
+					println("[-] Error: Target buffer `$buf_name` has not been allocated.")
+				}
+			} else {
+				println("[-] Error: Invalid set syntax. Use: set:buf_name:offset:type:value")
+			}
+			step_returns << voidptr(0)
+			continue
+		}
+
+		if sym_name.starts_with("dump:") {
+			parts := sym_name.split(":")
+			if parts.len >= 3 {
+				buf_name := parts[1]
+				mut size := parts[2].int()
+				if buf_name in named_buffers {
+					buf_info := named_buffers[buf_name] or { LocalBuffer{} }
+					buf_ptr := buf_info.ptr
+					buf_size := buf_info.size
+
+					if size > buf_size {
+						size = buf_size
+					}
+
+					unsafe {
+						println('[+] Pseudo-step: Hex/ASCII dump of `' + buf_name + '` (' + size.str() + ' bytes):')
+						for offset := 0; offset < size; offset += 16 {
+							mut hex_part := ""
+							mut ascii_part := ""
+							limit := if offset + 16 < size { offset + 16 } else { size }
+							for idx := offset; idx < limit; idx++ {
+								b := *&u8(voidptr(u64(buf_ptr) + u64(idx)))
+								hex_part += '${b:02x} '
+								if b >= 32 && b <= 126 {
+									ascii_part += b.ascii_str()
+								} else {
+									ascii_part += "."
+								}
+							}
+							if limit - offset < 16 {
+								padding_len := (16 - (limit - offset)) * 3
+								hex_part += " ".repeat(padding_len)
+							}
+							println("    0x${offset:02x}: " + hex_part + " | " + ascii_part)
+						}
+					}
+				} else {
+					println("[-] Error: Target buffer `$buf_name` has not been allocated.")
+				}
+			} else {
+				println("[-] Error: Invalid dump syntax. Use: dump:name:size")
+			}
+			step_returns << voidptr(0)
+			continue
+		}
 
 		offset := find_elf_symbol_offset(lib_path, sym_name)
 		if offset == 0 {
@@ -690,11 +880,12 @@ fn main() {
 					name := parts[1]
 					size := parts[2].int()
 					if name in named_buffers {
-						args << (named_buffers[name] or { voidptr(0) })
+						args << (named_buffers[name] or { LocalBuffer{} }).ptr
 					} else {
 						unsafe {
 							ptr := malloc(size)
-							named_buffers[name] = ptr
+							C.memset(ptr, 0, size)
+							named_buffers[name] = LocalBuffer{ ptr: ptr, size: size }
 							args << ptr
 						}
 					}
@@ -704,7 +895,7 @@ fn main() {
 			} else if arg_str.starts_with("p:") {
 				val_str := arg_str.substr(2, arg_str.len)
 				if val_str in named_buffers {
-					args << (named_buffers[val_str] or { voidptr(0) })
+					args << (named_buffers[val_str] or { LocalBuffer{} }).ptr
 				} else if val_str.starts_with("$") {
 					ref_idx := val_str.substr(1, val_str.len).int() - 1
 					if ref_idx >= 0 && ref_idx < step_returns.len {
@@ -868,8 +1059,8 @@ fn main() {
 		}
 	}
 
-	for _, ptr in named_buffers {
-		unsafe { free(ptr) }
+	for _, buf_info in named_buffers {
+		unsafe { free(buf_info.ptr) }
 	}
 
 	C.dlclose(handle)
