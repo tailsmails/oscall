@@ -975,6 +975,14 @@ type Call9 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, 
 type Call10 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 type Call11 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 type Call12 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call13 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call14 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call15 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call16 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call17 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call18 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call19 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call20 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 
 fn main() {
 	if os.args.len < 3 {
@@ -1506,6 +1514,38 @@ fn main() {
 					12 {
 						func := Call12(target_addr)
 						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+					}
+					13 {
+						func := Call13(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
+					}
+					14 {
+						func := Call14(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13])
+					}
+					15 {
+						func := Call15(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14])
+					}
+					16 {
+						func := Call16(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15])
+					}
+					17 {
+						func := Call17(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16])
+					}
+					18 {
+						func := Call18(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
+					}
+					19 {
+						func := Call19(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
+					}
+					20 {
+						func := Call20(target_addr)
+						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19])
 					}
 					else {
 						println("[-] Error: Unsupported number of arguments.")
