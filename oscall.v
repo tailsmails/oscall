@@ -2,6 +2,7 @@ module main
 
 import os
 import strconv
+import time
 
 #flag -ldl
 #include <dlfcn.h>
@@ -1001,6 +1002,7 @@ fn main() {
 		println("  o:int           -> Allocate local int buffer, print output")
 		println("  o:string        -> Allocate local 512-byte string buffer, print output")
 		println("Pseudo-steps (used as commands, e.g. cmd :: cmd):")
+		println("  sleep:ms                        -> Pause execution for specified milliseconds")
 		println("  alloc:name:size                 -> Pre-allocate a zero-initialized buffer on heap")
 		println("  set:name:offset:type:value      -> Write data into allocated buffer")
 		println("    Supported types: i8, i16, i32, i64, ptr, str, str_ptr")
@@ -1078,6 +1080,19 @@ fn main() {
 		if step.len == 0 { continue }
 		sym_name := step[0]
 		println("\n[!] === Executing Step " + (step_idx + 1).str() + " (" + sym_name + ") ===")
+
+		if sym_name.starts_with("sleep:") {
+			parts := sym_name.split(":")
+			if parts.len >= 2 {
+				ms := parts[1].int()
+				time.sleep(ms * time.millisecond)
+				println('[+] Pseudo-step: Slept for ' + ms.str() + ' ms')
+			} else {
+				println("[-] Error: Invalid sleep syntax. Use: sleep:ms")
+			}
+			step_returns << voidptr(0)
+			continue
+		}
 
 		if sym_name.starts_with("alloc:") {
 			parts := sym_name.split(":")
