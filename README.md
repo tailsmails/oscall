@@ -16,9 +16,9 @@ Under the hood, the execution cycle follows these steps:
 3. **Architecture Detection & ELF Parsing:** It reads the ELF class identifier from the physical binary, dynamically adapts to parse either ELF32 or ELF64 structures, and traverses the Section Headers.
 4. **Symbol Table Fallback:** It scans the static symbol table (`.symtab`). If the binary has been stripped, it automatically falls back to parsing the dynamic symbol table (`.dynsym`).
 5. **Absolute Pointer Resolution:** By matching the target symbol, it extracts the relative file offset and combines it with the base memory map address (`Base Address + Offset`), bypassing `dlsym` limitations on unexported or local C++ symbols (e.g., `_ZL` static functions).
-6. **Execution Pipeline Chaining:** Using the execution delimiter (`::`), the utility decomposes the CLI instructions into sequential steps, keeping the runtime environment intact.
+6. **Execution Pipeline Chaining:** Using the execution delimiter (`::`), the utility decomposes the CLI instructions into sequential steps, executing them within a single active process run.
 7. **Dynamic ABI Casting & Output Formatting:** Based on user-provided CLI arguments, it dynamically casts the absolute memory pointer to a corresponding function signature (from 0 to 12 arguments), triggers execution, and intercepts the return value to cast it into the specified output format.
-8. **State Preservation:** Registers named memory heap buffers across execution steps, allowing consecutive functions to reference and manipulate persistent objects.
+8. **State Preservation & Bounds Safety:** Labeled heap buffers are wrapped in a safety structure tracking both the memory pointer and the exact allocated size (`LocalBuffer`). This guarantees persistent lifecycle simulation while strictly guarding against out-of-bounds corruption.
 
 ---
 
@@ -28,8 +28,11 @@ Under the hood, the execution cycle follows these steps:
 - **Dynamic ABI Binder:** Call delegates supporting up to 12 arguments mapping to standard ARM/ARM64 and x86/x86_64 calling conventions.
 - **On-the-fly Return Formatting:** Casts and prints return values dynamically using runtime format indicators (`->int`, `->string`, `->bool`).
 - **Symbol Enumeration:** Quick directory/listing of all exported and internal symbols of any mapped library.
-- **Chained Execution Pipeline:** Sequential execution of multiple native functions in a single process run using the `::` delimiter.
+- **Chained Execution Pipeline:** Sequential execution of multiple native functions or memory manipulation steps using the `::` delimiter.
 - **Stateful Memory Binding:** Persistent heap allocation (`alloc:`) and reference tracking (`p:`) to simulate complex object initialization and lifecycle management.
+- **Memory Bounds Guarding:** Integrates an internal bounds checker that validates offsets and types against the parent buffer's allocated limits prior to writing (`set:`) or reading (`dump:`), preventing heap corruption or accidental segmentation faults.
+- **Zero-initialized Allocations:** Employs POSIX `C.memset` on all heap allocations, ensuring memory states are clean and free of garbage.
+- **Hex/ASCII Diagnostic Visualizer:** Safe memory inspection pseudo-command (`dump:`) validating output length boundaries and formatting raw memory spaces side-by-side.
 - **Piped Return Registering:** Reference and pass the raw or pointer-casted return values of previous execution steps (`$1`, `$2`, etc.) as arguments to subsequent functions.
 - **Reference / Output Capture:** Specialized runtime buffer allocation (`o:int` and `o:string`) to pass references as arguments and print the values modified by the native functions after execution.
 
@@ -74,6 +77,22 @@ oscall <lib_name_or_path> --list
 | `p:$1`, `p:$2`... | `p:$1` | Passes the 64-bit return value of Step 1, Step 2, etc., cast as a pointer. |
 | `o:int` | `o:int` | Allocates a local `int*` buffer, passes its address, and prints the updated value post-execution. |
 | `o:string` | `o:string`| Allocates a 512-byte `char*` buffer, passes its address, and prints the populated string post-execution. |
+
+### Pseudo-Step Commands
+
+When used as discrete commands (separated by `::`), pseudo-steps manage memory layout and inspection natively:
+
+- **`alloc:name:size`**: Allocates a zero-initialized heap buffer of `size` bytes, bound to the label `name`.
+- **`set:name:offset:type:value`**: Writes `value` at `offset` inside the labeled buffer `name`.
+  - *Supported Types:*
+    - `i8` / `char` / `u8` (1 byte)
+    - `i16` / `short` / `u16` (2 bytes)
+    - `i32` / `int` / `u32` (4 bytes)
+    - `i64` / `long` / `u64` (8 bytes) - accepts base-10 or `0x` hex strings.
+    - `ptr` (8 bytes) - registers other buffer addresses, previous step outputs (e.g. `$1`), or raw hex.
+    - `str` - copies string bytes directly (null-terminated inline buffer).
+    - `str_ptr` - writes a heap-bound char pointer to the offset (struct member pointer).
+- **`dump:name:size`**: Generates a standard hex/ASCII side-by-side memory visualizer. Automatically clips the visualization length to the boundary of the allocated buffer.
 
 ### Return Value Formatting
 
@@ -136,6 +155,42 @@ To call functions that expect an allocated structure or pointer to write their o
 To call C++ non-static member functions, allocate memory for the object, invoke the constructor to initialize it, and then call member functions by passing the initialized pointer as `this` (`x0` register) in a single run:
 ```bash
 ./oscall libfoo.so _ZN3FooC1Ev alloc:my_obj:512 :: _ZN3Foo7executeEii p:my_obj 10 20
+```
+
+### 6. Complex Stateful Orchestration & Struct Building (Time Conversion Pipeline)
+To prove full end-to-end capabilities, we can allocate space for a POSIX time structure (`struct tm`), populate a raw time buffer, convert it, and format it as a formatted string—all in a single shell run:
+```bash
+./oscall libc.so \
+  alloc:t:8 :: \
+  set:t:0:i64:1786270455 :: \
+  alloc:tm:64 :: \
+  localtime_r p:t p:tm :: \
+  dump:tm:40 :: \
+  alloc:out:64 :: \
+  strftime p:out 64 s:%Y-%m-%d_%H:%M:%S p:tm :: \
+  dump:out:32
+```
+**Output:**
+```text
+[!] === Executing Step 4 (localtime_r) ===
+[+] Symbol Offset: 0x00000000000e7ad0
+[!] Calling function with 2 args...
+[+] Return (Hex): 0x0000007719166d20
+
+[!] === Executing Step 5 (dump:tm:40) ===
+[+] Pseudo-step: Hex/ASCII dump of `tm` (40 bytes):
+    0x00: 0f 00 00 00 2c 00 00 00 0d 00 00 00 09 00 00 00  | ....,...........
+    0x10: 07 00 00 00 7e 00 00 00 00 00 00 00 dc 00 00 00  | ....~...........
+    0x20: 00 00 00 00 00 00 00 00                          | ........
+
+[!] === Executing Step 7 (strftime) ===
+[!] Calling function with 4 args...
+[+] Return (Hex): 0x0000000000000013
+
+[!] === Executing Step 8 (dump:out:32) ===
+[+] Pseudo-step: Hex/ASCII dump of `out` (32 bytes):
+    0x00: 32 30 32 36 2d 30 38 2d 30 39 5f 31 33 3a 34 34  | 2026-08-09_13:44
+    0x10: 3a 31 35 00 00 00 00 00 00 00 00 00 00 00 00 00  | :15.............
 ```
 
 ---
