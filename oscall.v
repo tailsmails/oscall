@@ -1245,6 +1245,109 @@ fn main() {
 			continue
 		}
 
+		if sym_name.starts_with("dump_sym:") {
+			parts := sym_name.split(":")
+			if parts.len >= 3 {
+				target_sym := parts[1]
+				mut size := parts[2].int()
+				sym_offset := find_elf_symbol_offset(lib_path, target_sym)
+				if sym_offset == 0 {
+					println("[-] Error: Symbol not found for dumping: " + target_sym)
+				} else {
+					sym_ptr := voidptr(base_addr + sym_offset)
+					unsafe {
+						println('[+] Pseudo-step: Hex/ASCII dump of symbol `' + target_sym + '` at ' + sym_ptr.str() + ' (' + size.str() + ' bytes):')
+						for offset := 0; offset < size; offset += 16 {
+							mut hex_part := ""
+							mut ascii_part := ""
+							limit := if offset + 16 < size { offset + 16 } else { size }
+							for idx := offset; idx < limit; idx++ {
+								b := *&u8(voidptr(u64(sym_ptr) + u64(idx)))
+								hex_part += '${b:02x} '
+								if b >= 32 && b <= 126 {
+									ascii_part += b.ascii_str()
+								} else {
+									ascii_part += "."
+								}
+							}
+							if limit - offset < 16 {
+								padding_len := (16 - (limit - offset)) * 3
+								hex_part += " ".repeat(padding_len)
+							}
+							println("    0x${offset:02x}: " + hex_part + " | " + ascii_part)
+						}
+					}
+				}
+			} else {
+				println("[-] Error: Invalid dump_sym syntax. Use: dump_sym:symbol_name:size")
+			}
+			step_returns << voidptr(0)
+			continue
+		}
+
+		if sym_name.starts_with("set_sym:") {
+			parts := sym_name.split(":")
+			if parts.len >= 5 {
+				target_sym := parts[1]
+				offset := parts[2].int()
+				val_type := parts[3]
+				val_str := parts[4..].join(":")
+
+				sym_offset := find_elf_symbol_offset(lib_path, target_sym)
+				if sym_offset == 0 {
+					println("[-] Error: Symbol not found for writing: " + target_sym)
+				} else {
+					sym_ptr := voidptr(base_addr + sym_offset)
+					unsafe {
+						target_ptr := voidptr(u64(sym_ptr) + u64(offset))
+						mut valid_write := false
+						match val_type {
+							"i8", "char", "u8" {
+								val := val_str.int()
+								*&u8(target_ptr) = u8(val)
+								valid_write = true
+							}
+							"i16", "short", "u16" {
+								val := val_str.int()
+								*&u16(target_ptr) = u16(val)
+								valid_write = true
+							}
+							"i32", "int", "u32" {
+								val := val_str.int()
+								*&u32(target_ptr) = u32(val)
+								valid_write = true
+							}
+							"i64", "long", "u64" {
+								mut val := u64(0)
+								if val_str.starts_with("0x") {
+									val = strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
+								} else {
+									val = strconv.parse_uint(val_str, 10, 64) or { 0 }
+								}
+								*&u64(target_ptr) = val
+								valid_write = true
+							}
+							"float", "f32" {
+								val := val_str.f32()
+								*&f32(target_ptr) = val
+								valid_write = true
+							}
+							else {}
+						}
+						if valid_write {
+							println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into symbol `' + target_sym + '` at offset ' + offset.str())
+						} else {
+							println("[-] Error: Unsupported or invalid write type: " + val_type)
+						}
+					}
+				}
+			} else {
+				println("[-] Error: Invalid set_sym syntax. Use: set_sym:symbol_name:offset:type:value")
+			}
+			step_returns << voidptr(0)
+			continue
+		}
+
 		offset := find_elf_symbol_offset(lib_path, sym_name)
 		if offset == 0 {
 			println("[-] Error: Symbol not found in ELF headers: " + sym_name)
