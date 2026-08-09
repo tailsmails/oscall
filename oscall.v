@@ -100,6 +100,407 @@ struct Elf64_Sym {
 	st_size  u64
 }
 
+struct Elf64_Dyn {
+	d_tag i64
+	d_val u64
+}
+
+struct Elf32_Dyn {
+	d_tag i32
+	d_val u32
+}
+
+fn get_elf_soname(file_path string) string {
+	if !os.exists(file_path) { return "" }
+	file_size := os.file_size(file_path)
+	if file_size < 52 { return "" }
+
+	mut file := os.open(file_path) or { return "" }
+	defer { file.close() }
+
+	ident := file.read_bytes_at(16, 0)
+	if ident.len < 16 { return "" }
+	if ident[0] != 0x7f || ident[1] != `E` || ident[2] != `L` || ident[3] != `F` {
+		return ""
+	}
+	class := ident[4]
+	if class != 1 && class != 2 { return "" }
+
+	if class == 2 {
+		if file_size < i64(sizeof(Elf64_Ehdr)) { return "" }
+		mut ehdr := Elf64_Ehdr{}
+		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
+		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return "" }
+		unsafe {
+			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
+		}
+
+		sh_num := ehdr.e_shnum
+		sh_entsize := ehdr.e_shentsize
+		if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
+			return ""
+		}
+		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return "" }
+
+		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
+		unsafe {
+			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+		}
+
+		mut dyn_shdr_idx := -1
+		mut dynstr_shdr_idx := -1
+
+		for i, shdr in shdrs {
+			if shdr.sh_type == 6 {
+				dyn_shdr_idx = i
+				dynstr_shdr_idx = int(shdr.sh_link)
+				break
+			}
+		}
+
+		if dyn_shdr_idx == -1 || dynstr_shdr_idx == -1 {
+			return ""
+		}
+
+		dyn_shdr := shdrs[dyn_shdr_idx]
+		dynstr_shdr := shdrs[dynstr_shdr_idx]
+
+		dyn_entry_count := dyn_shdr.sh_size / sizeof(Elf64_Dyn)
+		if dyn_entry_count == 0 || dyn_entry_count > 10000 { return "" }
+
+		dyn_bytes := file.read_bytes_at(int(dyn_shdr.sh_size), dyn_shdr.sh_offset)
+		if dyn_bytes.len < int(dyn_shdr.sh_size) { return "" }
+
+		mut dyn_entries := []Elf64_Dyn{len: int(dyn_entry_count)}
+		unsafe {
+			C.memcpy(dyn_entries.data, dyn_bytes.data, int(dyn_shdr.sh_size))
+		}
+
+		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
+		if dynstr.len < int(dynstr_shdr.sh_size) { return "" }
+
+		for entry in dyn_entries {
+			if entry.d_tag == 14 {
+				offset := entry.d_val
+				if offset < u64(dynstr.len) {
+					mut end := int(offset)
+					for end < dynstr.len && dynstr[end] != 0 {
+						end++
+					}
+					return dynstr[int(offset)..end].bytestr()
+				}
+			}
+		}
+	} else {
+		if file_size < i64(sizeof(Elf32_Ehdr)) { return "" }
+		mut ehdr := Elf32_Ehdr{}
+		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
+		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return "" }
+		unsafe {
+			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf32_Ehdr)))
+		}
+
+		sh_num := ehdr.e_shnum
+		sh_entsize := ehdr.e_shentsize
+		if sh_entsize < sizeof(Elf32_Shdr) || sh_num == 0 || sh_num > 10000 {
+			return ""
+		}
+		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return "" }
+
+		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
+		unsafe {
+			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+		}
+
+		mut dyn_shdr_idx := -1
+		mut dynstr_shdr_idx := -1
+
+		for i, shdr in shdrs {
+			if shdr.sh_type == 6 {
+				dyn_shdr_idx = i
+				dynstr_shdr_idx = int(shdr.sh_link)
+				break
+			}
+		}
+
+		if dyn_shdr_idx == -1 || dynstr_shdr_idx == -1 {
+			return ""
+		}
+
+		dyn_shdr := shdrs[dyn_shdr_idx]
+		dynstr_shdr := shdrs[dynstr_shdr_idx]
+
+		dyn_entry_count := dyn_shdr.sh_size / sizeof(Elf32_Dyn)
+		if dyn_entry_count == 0 || dyn_entry_count > 10000 { return "" }
+
+		dyn_bytes := file.read_bytes_at(int(dyn_shdr.sh_size), dyn_shdr.sh_offset)
+		if dyn_bytes.len < int(dyn_shdr.sh_size) { return "" }
+
+		mut dyn_entries := []Elf32_Dyn{len: int(dyn_entry_count)}
+		unsafe {
+			C.memcpy(dyn_entries.data, dyn_bytes.data, int(dyn_shdr.sh_size))
+		}
+
+		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
+		if dynstr.len < int(dynstr_shdr.sh_size) { return "" }
+
+		for entry in dyn_entries {
+			if entry.d_tag == 14 {
+				offset := entry.d_val
+				if offset < u32(dynstr.len) {
+					mut end := int(offset)
+					for end < dynstr.len && dynstr[end] != 0 {
+						end++
+					}
+					return dynstr[int(offset)..end].bytestr()
+				}
+			}
+		}
+	}
+	return ""
+}
+
+fn resolve_dependency_path(name string, base_dir string) string {
+	target_path := os.join_path(base_dir, name)
+	if os.exists(target_path) { return target_path }
+	std_paths := [
+		"/system/lib64/" + name,
+		"/vendor/lib64/" + name,
+		"/system_ext/lib64/" + name,
+		"/odm/lib64/" + name,
+		"/product/lib64/" + name,
+		"/vendor/lib64/hw/" + name,
+		"/system/lib64/hw/" + name,
+		"/system/lib/" + name,
+		"/vendor/lib/" + name,
+		"/system_ext/lib/" + name,
+		"/odm/lib/" + name,
+		"/product/lib/" + name,
+		"/vendor/lib/hw/" + name,
+		"/system/lib/hw/" + name,
+	]
+	for p in std_paths {
+		if os.exists(p) { return p }
+	}
+
+	dir_files := os.ls(base_dir) or { []string{} }
+	for f in dir_files {
+		if f.ends_with(".so") {
+			full_p := os.join_path(base_dir, f)
+			if get_elf_soname(full_p) == name {
+				return full_p
+			}
+		}
+	}
+
+	fallback_dirs := [
+		"/system/lib64/",
+		"/vendor/lib64/",
+		"/system_ext/lib64/",
+		"/odm/lib64/",
+		"/product/lib64/",
+		"/system/lib/",
+		"/vendor/lib/",
+	]
+	for d in fallback_dirs {
+		if d == base_dir { continue }
+		if !os.exists(d) { continue }
+		files_in_d := os.ls(d) or { []string{} }
+		for f in files_in_d {
+			if f.ends_with(".so") {
+				full_p := os.join_path(d, f)
+				if get_elf_soname(full_p) == name {
+					return full_p
+				}
+			}
+		}
+	}
+	return ""
+}
+
+fn get_elf_dependencies(file_path string) []string {
+	mut deps := []string{}
+	if !os.exists(file_path) { return deps }
+	file_size := os.file_size(file_path)
+	if file_size < 52 { return deps }
+
+	mut file := os.open(file_path) or { return deps }
+	defer { file.close() }
+
+	ident := file.read_bytes_at(16, 0)
+	if ident.len < 16 { return deps }
+	if ident[0] != 0x7f || ident[1] != `E` || ident[2] != `L` || ident[3] != `F` {
+		return deps
+	}
+	class := ident[4]
+	if class != 1 && class != 2 { return deps }
+
+	if class == 2 {
+		if file_size < i64(sizeof(Elf64_Ehdr)) { return deps }
+		mut ehdr := Elf64_Ehdr{}
+		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
+		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return deps }
+		unsafe {
+			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
+		}
+
+		sh_num := ehdr.e_shnum
+		sh_entsize := ehdr.e_shentsize
+		if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
+			return deps
+		}
+		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return deps }
+
+		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
+		unsafe {
+			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+		}
+
+		mut dyn_shdr_idx := -1
+		mut dynstr_shdr_idx := -1
+
+		for i, shdr in shdrs {
+			if shdr.sh_type == 6 {
+				dyn_shdr_idx = i
+				dynstr_shdr_idx = int(shdr.sh_link)
+				break
+			}
+		}
+
+		if dyn_shdr_idx == -1 || dynstr_shdr_idx == -1 {
+			return deps
+		}
+
+		dyn_shdr := shdrs[dyn_shdr_idx]
+		dynstr_shdr := shdrs[dynstr_shdr_idx]
+
+		dyn_entry_count := dyn_shdr.sh_size / sizeof(Elf64_Dyn)
+		if dyn_entry_count == 0 || dyn_entry_count > 10000 { return deps }
+
+		dyn_bytes := file.read_bytes_at(int(dyn_shdr.sh_size), dyn_shdr.sh_offset)
+		if dyn_bytes.len < int(dyn_shdr.sh_size) { return deps }
+
+		mut dyn_entries := []Elf64_Dyn{len: int(dyn_entry_count)}
+		unsafe {
+			C.memcpy(dyn_entries.data, dyn_bytes.data, int(dyn_shdr.sh_size))
+		}
+
+		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
+		if dynstr.len < int(dynstr_shdr.sh_size) { return deps }
+
+		for entry in dyn_entries {
+			if entry.d_tag == 1 {
+				offset := entry.d_val
+				if offset < u64(dynstr.len) {
+					mut end := int(offset)
+					for end < dynstr.len && dynstr[end] != 0 {
+						end++
+					}
+					dep_name := dynstr[int(offset)..end].bytestr()
+					if dep_name.len > 0 {
+						deps << dep_name
+					}
+				}
+			}
+		}
+	} else {
+		if file_size < i64(sizeof(Elf32_Ehdr)) { return deps }
+		mut ehdr := Elf32_Ehdr{}
+		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
+		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return deps }
+		unsafe {
+			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf32_Ehdr)))
+		}
+
+		sh_num := ehdr.e_shnum
+		sh_entsize := ehdr.e_shentsize
+		if sh_entsize < sizeof(Elf32_Shdr) || sh_num == 0 || sh_num > 10000 {
+			return deps
+		}
+		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return deps }
+
+		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
+		unsafe {
+			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+		}
+
+		mut dyn_shdr_idx := -1
+		mut dynstr_shdr_idx := -1
+
+		for i, shdr in shdrs {
+			if shdr.sh_type == 6 {
+				dyn_shdr_idx = i
+				dynstr_shdr_idx = int(shdr.sh_link)
+				break
+			}
+		}
+
+		if dyn_shdr_idx == -1 || dynstr_shdr_idx == -1 {
+			return deps
+		}
+
+		dyn_shdr := shdrs[dyn_shdr_idx]
+		dynstr_shdr := shdrs[dynstr_shdr_idx]
+
+		dyn_entry_count := dyn_shdr.sh_size / sizeof(Elf32_Dyn)
+		if dyn_entry_count == 0 || dyn_entry_count > 10000 { return deps }
+
+		dyn_bytes := file.read_bytes_at(int(dyn_shdr.sh_size), dyn_shdr.sh_offset)
+		if dyn_bytes.len < int(dyn_shdr.sh_size) { return deps }
+
+		mut dyn_entries := []Elf32_Dyn{len: int(dyn_entry_count)}
+		unsafe {
+			C.memcpy(dyn_entries.data, dyn_bytes.data, int(dyn_shdr.sh_size))
+		}
+
+		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
+		if dynstr.len < int(dynstr_shdr.sh_size) { return deps }
+
+		for entry in dyn_entries {
+			if entry.d_tag == 1 {
+				offset := entry.d_val
+				if offset < u32(dynstr.len) {
+					mut end := int(offset)
+					for end < dynstr.len && dynstr[end] != 0 {
+						end++
+					}
+					dep_name := dynstr[int(offset)..end].bytestr()
+					if dep_name.len > 0 {
+						deps << dep_name
+					}
+				}
+			}
+		}
+	}
+	return deps
+}
+
+fn load_dependencies_recursive(lib_path string, mut loaded_map map[string]bool) {
+	base_dir := os.dir(lib_path)
+	deps := get_elf_dependencies(lib_path)
+	for dep in deps {
+		if dep in ["libc.so", "libm.so", "libdl.so", "liblog.so"] { continue }
+		if dep in loaded_map { continue }
+		dep_path := resolve_dependency_path(dep, base_dir)
+		if dep_path.len > 0 {
+			load_dependencies_recursive(dep_path, mut loaded_map)
+			dep_handle := C.dlopen(&char(dep_path.str), 2 | 0x100)
+			if isnil(dep_handle) {
+				println("  [-] Warning: Failed to pre-load dependency: " + dep)
+			} else {
+				loaded_map[dep] = true
+				println("  -> Found dependency: " + dep_path + " (Pre-loaded)")
+			}
+		} else {
+			println("  [-] Warning: Could not resolve path for dependency: " + dep)
+		}
+	}
+}
+
 fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 	if !os.exists(file_path) { return 0 }
 	file_size := os.file_size(file_path)
@@ -605,7 +1006,6 @@ fn main() {
 	}
 
 	mut lib_arg := os.args[1]
-
 	mut lib_path := lib_arg
 	if !lib_path.starts_with("/") {
 		lib_path = "/system/lib64/" + lib_arg
@@ -629,6 +1029,10 @@ fn main() {
 		list_elf_symbols(lib_path)
 		return
 	}
+
+	mut loaded_map := map[string]bool{}
+	println("[*] Detecting dependencies from ELF headers...")
+	load_dependencies_recursive(lib_path, mut loaded_map)
 
 	handle := C.dlopen(&char(lib_path.str), 1)
 	if isnil(handle) {
@@ -705,7 +1109,6 @@ fn main() {
 					buf_size := buf_info.size
 					unsafe {
 						target_ptr := voidptr(u64(buf_ptr) + u64(offset))
-						
 						mut valid_write := false
 						match val_type {
 							"i8", "char", "u8" {
@@ -781,9 +1184,7 @@ fn main() {
 									println('[+] Pseudo-step: Written string pointer (' + voidptr(str_ptr).str() + ') to "' + val_str + '" into `' + buf_name + '` at offset ' + offset.str())
 								}
 							}
-							else {
-								println("[-] Error: Unsupported write type: $val_type")
-							}
+							else {}
 						}
 
 						if !valid_write {
@@ -809,11 +1210,9 @@ fn main() {
 					buf_info := named_buffers[buf_name] or { LocalBuffer{} }
 					buf_ptr := buf_info.ptr
 					buf_size := buf_info.size
-
 					if size > buf_size {
 						size = buf_size
 					}
-
 					unsafe {
 						println('[+] Pseudo-step: Hex/ASCII dump of `' + buf_name + '` (' + size.str() + ' bytes):')
 						for offset := 0; offset < size; offset += 16 {
@@ -951,7 +1350,6 @@ fn main() {
 		unsafe {
 			C.signal(11, voidptr(C.v_segfault_handler))
 			C.signal(7, voidptr(C.v_segfault_handler))
-
 			if C.safe_sigsetjmp() == 0 {
 				match args.len {
 					0 {
@@ -1032,7 +1430,6 @@ fn main() {
 			} else {
 				println("[-] Error: Execution was aborted due to a Segmentation Fault (SIGSEGV/SIGBUS).")
 			}
-
 			C.signal(11, voidptr(0))
 			C.signal(7, voidptr(0))
 		}
@@ -1041,9 +1438,7 @@ fn main() {
 			println("[-] Error: Step " + (step_idx + 1).str() + " failed (returned -1). Aborting chain to prevent crash.")
 			break
 		}
-
 		step_returns << step_res
-
 		if success {
 			for idx, buf in out_buffers {
 				unsafe {
@@ -1062,6 +1457,5 @@ fn main() {
 	for _, buf_info in named_buffers {
 		unsafe { free(buf_info.ptr) }
 	}
-
 	C.dlclose(handle)
 }
