@@ -1,6 +1,6 @@
 # oscall
 
-A native, low-level CLI utility written in V for inspecting, loading, and dynamically executing arbitrary C/C++ functions within shared libraries (`.so`) on Linux and Android (both 32-bit and 64-bit) environments.
+A native, low-level CLI utility written in V for inspecting, loading, and dynamically executing arbitrary C/C++ functions, as well as inspecting and patching memory of symbols within shared libraries (`.so`) on Linux and Android (both 32-bit and 64-bit) environments.
 
 `oscall` is designed for platform developers, hardware diagnostic engineers, and security researchers who need to interact with internal, stripped, or dynamically registered vendor APIs directly from the command line without compiling custom wrapping code.
 
@@ -19,6 +19,7 @@ Under the hood, the execution cycle follows these steps:
 6. **Execution Pipeline Chaining:** Using the execution delimiter (`::`), the utility decomposes the CLI instructions into sequential steps, executing them within a single active process run.
 7. **Dynamic ABI Casting & Output Formatting:** Based on user-provided CLI arguments, it dynamically casts the absolute memory pointer to a corresponding function signature (from 0 to 12 arguments), triggers execution, and intercepts the return value to cast it into the specified output format.
 8. **State Preservation & Bounds Safety:** Labeled heap buffers are wrapped in a safety structure tracking both the memory pointer and the exact allocated size (`LocalBuffer`). This guarantees persistent lifecycle simulation while strictly guarding against out-of-bounds corruption.
+9. **Direct Symbol Peeking & Patching:** Instead of code execution, the utility can map resolved symbol offsets (such as global variables or static configuration structs) directly to virtual memory pointers, facilitating on-the-fly visualization and values modification.
 
 ---
 
@@ -31,6 +32,7 @@ Under the hood, the execution cycle follows these steps:
 - **Chained Execution Pipeline:** Sequential execution of multiple native functions or memory manipulation steps using the `::` delimiter.
 - **Stateful Memory Binding:** Persistent heap allocation (`alloc:`) and reference tracking (`p:`) to simulate complex object initialization and lifecycle management.
 - **Memory Bounds Guarding:** Integrates an internal bounds checker that validates offsets and types against the parent buffer's allocated limits prior to writing (`set:`) or reading (`dump:`), preventing heap corruption or accidental segmentation faults.
+- **Direct Symbol Manipulation Engine:** Native pseudo-steps (`dump_sym:`, `set_sym:`) designed to examine and patch static global structures and variables in-memory, introducing dedicated single-precision `float` / `f32` writing.
 - **Zero-initialized Allocations:** Employs POSIX `C.memset` on all heap allocations, ensuring memory states are clean and free of garbage.
 - **Hex/ASCII Diagnostic Visualizer:** Safe memory inspection pseudo-command (`dump:`) validating output length boundaries and formatting raw memory spaces side-by-side.
 - **Piped Return Registering:** Reference and pass the raw or pointer-casted return values of previous execution steps (`$1`, `$2`, etc.) as arguments to subsequent functions.
@@ -84,15 +86,18 @@ When used as discrete commands (separated by `::`), pseudo-steps manage memory l
 
 - **`alloc:name:size`**: Allocates a zero-initialized heap buffer of `size` bytes, bound to the label `name`.
 - **`set:name:offset:type:value`**: Writes `value` at `offset` inside the labeled buffer `name`.
-  - *Supported Types:*
+- **`dump:name:size`**: Generates a standard hex/ASCII side-by-side memory visualizer for an allocated buffer.
+- **`dump_sym:symbol_name:size`**: Reads the mapped memory location of `symbol_name` directly and outputs a standard hex/ASCII diagnostic block.
+- **`set_sym:symbol_name:offset:type:value`**: Directly patches memory values at `offset` relative to the resolved address of `symbol_name`.
+  - *Supported Types for `set:` and `set_sym:`:*
     - `i8` / `char` / `u8` (1 byte)
     - `i16` / `short` / `u16` (2 bytes)
     - `i32` / `int` / `u32` (4 bytes)
     - `i64` / `long` / `u64` (8 bytes) - accepts base-10 or `0x` hex strings.
-    - `ptr` (8 bytes) - registers other buffer addresses, previous step outputs (e.g. `$1`), or raw hex.
+    - `ptr` (8 bytes) - registers other buffer addresses, previous step outputs, or raw hex.
     - `str` - copies string bytes directly (null-terminated inline buffer).
     - `str_ptr` - writes a heap-bound char pointer to the offset (struct member pointer).
-- **`dump:name:size`**: Generates a standard hex/ASCII side-by-side memory visualizer. Automatically clips the visualization length to the boundary of the allocated buffer.
+    - `float` / `f32` (4 bytes) - *Supported in `set_sym:` only*. Writes standard IEEE 754 single-precision floating-point values.
 
 ### Return Value Formatting
 
@@ -157,7 +162,28 @@ To call C++ non-static member functions, allocate memory for the object, invoke 
 ./oscall libfoo.so _ZN3FooC1Ev alloc:my_obj:512 :: _ZN3Foo7executeEii p:my_obj 10 20
 ```
 
-### 6. Complex Stateful Orchestration & Struct Building (Time Conversion Pipeline)
+### 6. Inspecting and Overwriting Global Library Configurations (Dynamic Parameter Tuning)
+To read, patch, and verify the memory space of a global library parameter struct without rebuilding or modifying files on disk:
+```bash
+./oscall libfoo.so dump_sym:global_paras:32 :: set_sym:global_paras:16:float:0.85 :: dump_sym:global_paras:32
+```
+**Output:**
+```text
+[!] === Executing Step 1 (dump_sym:global_paras:32) ===
+[+] Pseudo-step: Hex/ASCII dump of symbol `global_paras` at 0x72e7a7e878 (32 bytes):
+    0x00: cd cc 8c 3f cd cc 4c 3e 00 00 48 43 00 00 c8 42  | ...?..L>..HC...B
+    0x10: 00 00 00 3f 00 00 a0 40 00 00 70 42 00 00 48 43  | ...?...@..pB..HC
+
+[!] === Executing Step 2 (set_sym:global_paras:16:float:0.85) ===
+[+] Pseudo-step: Written float (0.85) into symbol `global_paras` at offset 16
+
+[!] === Executing Step 3 (dump_sym:global_paras:32) ===
+[+] Pseudo-step: Hex/ASCII dump of symbol `global_paras` at 0x72e7a7e878 (32 bytes):
+    0x00: cd cc 8c 3f cd cc 4c 3e 00 00 48 43 00 00 c8 42  | ...?..L>..HC...B
+    0x10: 9a 99 59 3f 00 00 a0 40 00 00 70 42 00 00 48 43  | ..Y?...@..pB..HC
+```
+
+### 7. Complex Stateful Orchestration & Struct Building (Time Conversion Pipeline)
 To prove full end-to-end capabilities, we can allocate space for a POSIX time structure (`struct tm`), populate a raw time buffer, convert it, and format it as a formatted string—all in a single shell run:
 ```bash
 ./oscall libc.so \
