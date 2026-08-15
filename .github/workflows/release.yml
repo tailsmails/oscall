@@ -20,6 +20,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
+
+          - target: linux-amd64
+            runner: ubuntu-latest
+            setup_cmd: sudo apt-get update && sudo apt-get install -y musl-tools
+            build_cmd: |
+              V_ROOT=$(dirname $(readlink -f $(which v)))
+              v $EXTRA_FLAGS -d no_backtrace -enable-globals -autofree -os linux -o $APP_NAME.c .
+              musl-gcc -O3 -static -I "$V_ROOT/thirdparty/cJSON" $APP_NAME.c "$V_ROOT/thirdparty/cJSON/cJSON.c" -o $APP_NAME$SUFFIX -lm
+            artifact_suffix: -linux-amd64
+
+          - target: linux-arm64
+            runner: ubuntu-latest
+            setup_cmd: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            build_cmd: |
+              V_ROOT=$(dirname $(readlink -f $(which v)))
+              v $EXTRA_FLAGS -d no_backtrace -enable-globals -autofree -os linux -o $APP_NAME.c .
+              aarch64-linux-gnu-gcc -O3 -static -I "$V_ROOT/thirdparty/cJSON" $APP_NAME.c "$V_ROOT/thirdparty/cJSON/cJSON.c" -o $APP_NAME$SUFFIX -lm
+            artifact_suffix: -linux-arm64
+
           - target: android-arm64
             runner: ubuntu-latest
             setup_cmd: ""
