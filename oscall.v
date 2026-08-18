@@ -1166,48 +1166,49 @@ fn main() {
 		}
 
 		if sym_name.starts_with('write:') || sym_name.starts_with('w:') {
-			parts := sym_name.split(':')
-			if parts.len == 3 {
-				target := parts[1]
-				raw_hex := parts[2]
-				bytes := hex_to_bytes(raw_hex)
-				if target in named_buffers {
-					buf := named_buffers[target] or { LocalBuffer{} }
-					copy_len := if bytes.len > buf.size { buf.size } else { bytes.len }
-					unsafe {
-						C.memcpy(buf.ptr, bytes.data, usize(copy_len))
-					}
-					if target_pid > 0 && buf.remote_ptr != 0 {
-						C.write_remote_mem(target_pid, buf.remote_ptr, bytes.data, usize(copy_len))
-					}
-					println('[+] Wrote ' + copy_len.str() + ' bytes to `' + target + '`')
-				} else if target.starts_with('0x') {
-					addr := strconv.parse_uint(target.replace('0x', ''), 16, 64) or { 0 }
-					if target_pid > 0 {
-						C.write_remote_mem(target_pid, addr, bytes.data, usize(bytes.len))
-					} else {
-						unsafe { C.memcpy(voidptr(addr), bytes.data, usize(bytes.len)) }
-					}
-					println('[+] Wrote ' + bytes.len.str() + ' bytes to 0x' + addr.hex_full())
-				} else if target.starts_with('$') {
-					ref_idx := target.substr(1, target.len).int() - 1
-					if ref_idx >= 0 && ref_idx < step_returns.len {
-						p_addr := u64(step_returns[ref_idx].p_val)
-						if target_pid > 0 {
-							C.write_remote_mem(target_pid, p_addr, bytes.data, usize(bytes.len))
-						} else {
-							unsafe { C.memcpy(voidptr(p_addr), bytes.data, usize(bytes.len)) }
-						}
-						println('[+] Wrote ' + bytes.len.str() + ' bytes to $' + (ref_idx + 1).str())
-					}
+			prefix_len := if sym_name.starts_with('write:') { 6 } else { 2 }
+			body := sym_name[prefix_len..]
+			parts := body.split(':')
+			if parts.len >= 2 {
+				target := parts[0]
+				mut offset := 0
+				mut val_part := ''
+
+				if parts.len >= 3 && parts[1].is_int() {
+					offset = parts[1].int()
+					val_part = parts[2..].join(':')
+				} else {
+					val_part = parts[1..].join(':')
 				}
-				step_returns << StepReturn{ p_val: voidptr(0), i_val: 0 }
-				continue
-			} else if parts.len >= 4 {
-				target := parts[1]
-				offset := parts[2].int()
-				raw_hex := parts[3]
-				bytes := hex_to_bytes(raw_hex)
+
+				mut bytes := []u8{}
+				if val_part.starts_with('s:') {
+					str_val := val_part[2..]
+					for b in str_val.bytes() {
+						bytes << b
+					}
+					bytes << 0
+				} else if val_part.starts_with('p:') {
+					ptr_str := val_part[2..]
+					mut ptr_val := u64(0)
+					if ptr_str.starts_with('$') {
+						ref_idx := ptr_str[1..].int() - 1
+						if ref_idx >= 0 && ref_idx < step_returns.len {
+							ptr_val = u64(step_returns[ref_idx].p_val)
+						}
+					} else if ptr_str in named_buffers {
+						buf := named_buffers[ptr_str] or { LocalBuffer{} }
+						ptr_val = if buf.remote_ptr != 0 { buf.remote_ptr } else { u64(buf.ptr) }
+					} else {
+						ptr_val = strconv.parse_uint(ptr_str.replace('0x', ''), 16, 64) or { 0 }
+					}
+					for k := 0; k < 8; k++ {
+						bytes << u8((ptr_val >> (k * 8)) & 0xFF)
+					}
+				} else {
+					bytes = hex_to_bytes(val_part)
+				}
+
 				if target in named_buffers {
 					buf := named_buffers[target] or { LocalBuffer{} }
 					if offset < buf.size {
@@ -1221,6 +1222,25 @@ fn main() {
 							C.write_remote_mem(target_pid, buf.remote_ptr + u64(offset), bytes.data, usize(copy_len))
 						}
 						println('[+] Wrote ' + copy_len.str() + ' bytes to `' + target + '` at offset +' + offset.str())
+					}
+				} else if target.starts_with('0x') {
+					addr := (strconv.parse_uint(target.replace('0x', ''), 16, 64) or { 0 }) + u64(offset)
+					if target_pid > 0 {
+						C.write_remote_mem(target_pid, addr, bytes.data, usize(bytes.len))
+					} else {
+						unsafe { C.memcpy(voidptr(addr), bytes.data, usize(bytes.len)) }
+					}
+					println('[+] Wrote ' + bytes.len.str() + ' bytes to 0x' + addr.hex_full())
+				} else if target.starts_with('$') {
+					ref_idx := target[1..].int() - 1
+					if ref_idx >= 0 && ref_idx < step_returns.len {
+						p_addr := u64(step_returns[ref_idx].p_val) + u64(offset)
+						if target_pid > 0 {
+							C.write_remote_mem(target_pid, p_addr, bytes.data, usize(bytes.len))
+						} else {
+							unsafe { C.memcpy(voidptr(p_addr), bytes.data, usize(bytes.len)) }
+						}
+						println('[+] Wrote ' + bytes.len.str() + ' bytes to $' + (ref_idx + 1).str())
 					}
 				}
 				step_returns << StepReturn{ p_val: voidptr(0), i_val: 0 }
@@ -1262,7 +1282,7 @@ fn main() {
 				mut u_val := u64(0)
 				unsafe { C.memcpy(&u_val, &dbl_val, sizeof(f64)) }
 				args << voidptr(u_val)
-				remote_args << u_val
+				remote_args << u64(u_val)
 			} else if arg_str.starts_with('p:') {
 				val_str := arg_str.substr(2, arg_str.len)
 				mut p_ptr := voidptr(0)
