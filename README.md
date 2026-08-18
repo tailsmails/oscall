@@ -2,56 +2,71 @@
 
 A native, low-level CLI utility written in V for inspecting, loading, and dynamically executing arbitrary C/C++ functions, as well as inspecting and patching memory of symbols within shared libraries (`.so`) on Linux and Android (both 32-bit and 64-bit) environments.
 
-`oscall` is designed for platform developers, hardware diagnostic engineers, and security researchers who need to interact with internal, stripped, or dynamically registered vendor APIs directly from the command line without compiling custom wrapping code.
+`oscall` operates in two distinct operational modes: **Local In-Process Execution** (via `dlopen` and direct memory mapping) and **Remote Process Invocation** (via `ptrace` and cross-architecture register hijacking). It is designed for platform developers, baseband/telephony diagnostic engineers, and security researchers who need to interact with internal, stripped, or dynamically registered vendor APIs directly from the command line without compiling custom wrapping code or deploying heavyweight instrumentation frameworks like Frida.
 
 ---
 
 ## Technical Overview
 
-`oscall` operates by bypassing traditional high-level JVM constraints and interfacing directly with the native execution layers. It bridges the gap between static binary analysis and active dynamic invocation.
+`oscall` operates by bypassing traditional high-level JVM/Binder constraints and interfacing directly with the native execution layers. It bridges the gap between static binary analysis and active dynamic invocation across both isolated and live process contexts.
 
-Under the hood, the execution cycle follows these steps:
-1. **Dynamic Loading:** The target library is mapped into the memory space of `oscall` using POSIX dynamic linking interfaces.
+### Execution Pipelines
+
+#### Mode A: Local In-Process Execution (`dlopen`)
+1. **Dynamic Loading:** The target library is mapped into the memory space of `oscall` using POSIX dynamic linking interfaces with automated recursive dependency resolution.
 2. **Memory Map Parsing:** The utility reads `/proc/self/maps` of its own active process to resolve the base virtual memory load address of the target library.
 3. **Architecture Detection & ELF Parsing:** It reads the ELF class identifier from the physical binary, dynamically adapts to parse either ELF32 or ELF64 structures, and traverses the Section Headers.
 4. **Symbol Table Fallback:** It scans the static symbol table (`.symtab`). If the binary has been stripped, it automatically falls back to parsing the dynamic symbol table (`.dynsym`).
 5. **Absolute Pointer Resolution:** By matching the target symbol, it extracts the relative file offset and combines it with the base memory map address (`Base Address + Offset`), bypassing `dlsym` limitations on unexported or local C++ symbols (e.g., `_ZL` static functions).
 6. **Execution Pipeline Chaining:** Using the execution delimiter (`::`), the utility decomposes the CLI instructions into sequential steps, executing them within a single active process run.
 7. **Dynamic ABI Casting & Output Formatting:** Based on user-provided CLI arguments, it dynamically casts the absolute memory pointer to a corresponding function signature (from 0 to 12 arguments), triggers execution, and intercepts the return value to cast it into the specified output format.
-8. **State Preservation & Bounds Safety:** Labeled heap buffers are wrapped in a safety structure tracking both the memory pointer and the exact allocated size (`LocalBuffer`). This guarantees persistent lifecycle simulation while strictly guarding against out-of-bounds corruption.
-9. **Direct Symbol Peeking & Patching:** Instead of code execution, the utility can map resolved symbol offsets (such as global variables or static configuration structs) directly to virtual memory pointers, facilitating on-the-fly visualization and values modification.
+8. **Fault Tolerance & State Safety:** Signal handlers (`SIGSEGV`, `SIGBUS`) wrapped around `sigsetjmp` / `siglongjmp` intercept memory access violations safely, preventing unhandled runner crashes.
+
+#### Mode B: Remote Process Invocation (`ptrace` / `-p <pid>`)
+1. **Remote Base Resolution:** Reads `/proc/<PID>/maps` of the target active process to pinpoint the live virtual memory load base of the target module.
+2. **Non-Invasive Process Attachment:** Attaches to the remote thread via `PTRACE_ATTACH`, synchronizes with `waitpid`, and captures the complete CPU register state (`PTRACE_GETREGSET` / `PTRACE_GETREGS`).
+3. **Cross-Architecture Register Staging:** Automatically selects and configures the target ABI calling convention:
+   - **AArch64:** Arguments mapped to registers `X0`–`X7`; stack frame aligned to 16 bytes; Link Register (`X30` / `LR`) set to a trapping return address (`0x0`).
+   - **x86_64:** Arguments mapped to `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9`; dummy return address pushed to stack; `RIP` pointed to the target function.
+   - **ARM32:** Arguments mapped to `R0`–`R3`; stack frame aligned to 8 bytes; `LR` set to `0x0`.
+   - **i386:** Arguments pushed directly onto the stack in accordance with standard `cdecl`.
+4. **Kernel-Level Remote Memory Staging:** Writes string buffers and complex arguments directly into the target process stack/scratch space using Linux `process_vm_writev` with an automated fallback to `PTRACE_POKEDATA`.
+5. **Execution & Return Interception:** Resumes execution via `PTRACE_CONT` until the return address triggers a trap. `oscall` intercepts the signal, harvests the return register (`X0`, `RAX`, or `R0`), fully restores the original CPU context, and cleanly detaches (`PTRACE_DETACH`) without altering a single byte of the target process's code segment.
 
 ---
 
 ## Key Features
 
-- **Multi-Arch ELF Parser:** Built-in low-level ELF parser supporting both 32-bit (ELF32) and 64-bit (ELF64) symbol matching and extraction from `.symtab` and `.dynsym`.
-- **Dynamic ABI Binder:** Call delegates supporting up to 12 arguments mapping to standard ARM/ARM64 and x86/x86_64 calling conventions.
-- **On-the-fly Return Formatting:** Casts and prints return values dynamically using runtime format indicators (`->int`, `->string`, `->bool`).
-- **Symbol Enumeration:** Quick directory/listing of all exported and internal symbols of any mapped library.
+- **Dual Execution Engine:** Supports standalone local invocation (`dlopen`) and non-destructive remote process invocation (`ptrace`).
+- **Cross-Architecture Support:** Built-in multi-architecture engine supporting **AArch64**, **ARM32**, **x86_64**, and **i386** calling conventions.
+- **Multi-Arch ELF Parser:** Low-level ELF parser supporting both 32-bit (ELF32) and 64-bit (ELF64) symbol matching and extraction from `.symtab` and `.dynsym`.
+- **Zero-Modification Remote Execution:** Executes functions within live, running daemons (e.g., Android `rild`, native vendor services) without code hooking, memory patching, or binary tampering.
+- **Direct Syscall Memory Engine:** Employs raw kernel syscalls (`__NR_process_vm_readv` / `__NR_process_vm_writev`) for fast remote memory transfers with POSIX `ptrace` fallbacks.
+- **Dynamic ABI Binder:** Call delegates supporting up to 12 arguments mapping to standard platform calling conventions.
+- **On-the-fly Return Formatting:** Casts and prints return values dynamically using runtime format indicators (`->int`, `->string`, `->bool`, `->hex`).
+- **Symbol Enumeration:** Quick directory/listing of all exported and internal symbols of any mapped library (`--list`).
 - **Chained Execution Pipeline:** Sequential execution of multiple native functions or memory manipulation steps using the `::` delimiter.
 - **Stateful Memory Binding:** Persistent heap allocation (`alloc:`) and reference tracking (`p:`) to simulate complex object initialization and lifecycle management.
-- **Memory Bounds Guarding:** Integrates an internal bounds checker that validates offsets and types against the parent buffer's allocated limits prior to writing (`set:`) or reading (`dump:`), preventing heap corruption or accidental segmentation faults.
+- **Memory Bounds Guarding:** Integrates an internal bounds checker that validates offsets and types against the parent buffer's allocated limits prior to writing (`set:`) or reading (`dump:`), preventing heap corruption.
 - **Direct Symbol Manipulation Engine:** Native pseudo-steps (`dump_sym:`, `set_sym:`) designed to examine and patch static global structures and variables in-memory, introducing dedicated single-precision `float` / `f32` writing.
-- **Zero-initialized Allocations:** Employs POSIX `C.memset` on all heap allocations, ensuring memory states are clean and free of garbage.
 - **Hex/ASCII Diagnostic Visualizer:** Safe memory inspection pseudo-command (`dump:`) validating output length boundaries and formatting raw memory spaces side-by-side.
 - **Piped Return Registering:** Reference and pass the raw or pointer-casted return values of previous execution steps (`$1`, `$2`, etc.) as arguments to subsequent functions.
-- **Reference / Output Capture:** Specialized runtime buffer allocation (`o:int` and `o:string`) to pass references as arguments and print the values modified by the native functions after execution.
 
 ---
 
 ## Compilation
 
-Ensure you have the V compiler installed. To cross-compile for Android (ARM64) from your development machine:
+Ensure you have the V compiler and a C compiler (GCC or Clang) installed.
 
+### Native Compilation (Linux / Termux)
+Place `helper.h` in the same directory as `oscall.v` and compile:
 ```bash
-v -os android -arch arm64 oscall.v -o oscall
+v -prod oscall.v -o oscall
 ```
 
-To compile natively on Linux:
-
+### Cross-Compilation for Android (ARM64)
 ```bash
-v oscall.v -o oscall
+v -prod -os android -arch arm64 oscall.v -o oscall
 ```
 
 ---
@@ -59,31 +74,41 @@ v oscall.v -o oscall
 ## Usage
 
 ```bash
+# Local In-Process Execution Mode
 oscall <lib_name_or_path> <symbol_name_or_substring> [arg1] [arg2] [arg3]...
+
+# Remote Process Execution Mode (Targeting Live PID)
+oscall -p <pid> <lib_name_or_path> <symbol_name_or_substring> [arg1] [arg2]...
+
+# Pipeline Chaining Mode
 oscall <lib_name_or_path> <symbol_name> [args] :: <symbol_name_2> [args] :: ...
+
+# Symbol Table Inspection
 oscall <lib_name_or_path> --list
 ```
 
 ### Argument Prefixes and Types
 
-`oscall` treats command-line arguments as 64-bit register values (`voidptr`). To define pointers, strings, or buffers, use the following syntax:
+`oscall` treats command-line arguments as register values (`voidptr` / `uintptr_t`). To define pointers, strings, or buffers, use the following syntax:
 
 | Prefix | Example | Description |
 | :--- | :--- | :--- |
-| *(None)* | `123` | Passed as a raw 64-bit integer (`int`). |
+| *(None)* | `123` / `-42` | Passed as a raw integer. |
+| `0x...` | `0x7a41` | Parsed as a hexadecimal value and loaded directly into the argument register. |
 | `p:` | `p:0x7a41` | Parsed as a hex address and passed as a raw memory pointer. Use `p:0x0` for `nullptr`. |
-| `s:` | `s:my_text` | Allocates a null-terminated C-string in memory and passes its pointer. |
+| `s:` | `s:my_text` | Allocates a null-terminated C-string (locally or in remote stack) and passes its pointer. |
 | `alloc:name:size` | `alloc:my_buf:64` | Allocates a persistent `size`-byte buffer on the heap, registered under `name`, and passes its pointer. |
 | `p:name` | `p:my_buf` | Looks up the registered heap buffer `name` and passes its memory pointer. |
-| `$1`, `$2`... | `$1` | Passes the raw 64-bit return value of Step 1, Step 2, etc. |
-| `p:$1`, `p:$2`... | `p:$1` | Passes the 64-bit return value of Step 1, Step 2, etc., cast as a pointer. |
-| `o:int` | `o:int` | Allocates a local `int*` buffer, passes its address, and prints the updated value post-execution. |
-| `o:string` | `o:string`| Allocates a 512-byte `char*` buffer, passes its address, and prints the populated string post-execution. |
+| `$1`, `$2`... | `$1` | Passes the raw return value of Step 1, Step 2, etc. |
+| `p:$1`, `p:$2`... | `p:$1` | Passes the return value of Step 1, Step 2, etc., cast as a pointer. |
+| `o:int` | `o:int` | *(Local mode)* Allocates a local `int*` buffer, passes its address, and prints the updated value post-execution. |
+| `o:string` | `o:string`| *(Local mode)* Allocates a 512-byte `char*` buffer, passes its address, and prints the populated string post-execution. |
 
 ### Pseudo-Step Commands
 
 When used as discrete commands (separated by `::`), pseudo-steps manage memory layout and inspection natively:
 
+- **`sleep:ms`**: Pauses pipeline execution for the specified milliseconds.
 - **`alloc:name:size`**: Allocates a zero-initialized heap buffer of `size` bytes, bound to the label `name`.
 - **`set:name:offset:type:value`**: Writes `value` at `offset` inside the labeled buffer `name`.
 - **`dump:name:size`**: Generates a standard hex/ASCII side-by-side memory visualizer for an allocated buffer.
@@ -122,21 +147,48 @@ To scan and print the complete offset table of a library:
 ./oscall libc.so --list
 ```
 
-### 2. Basic Arithmetic and Value Interpretation
+### 2. Basic Arithmetic and Value Interpretation (Local Mode)
 To call a function and format the return value directly as a signed integer:
 ```bash
-./oscall libc.so geteuid "->int"
+./oscall libc.so abs -42 "->int"
 ```
 **Output:**
 ```text
-[!] === Executing Step 1 (geteuid) ===
-[+] Symbol Offset: 0x00000000000e56d0
-[+] Target Memory Address: 0x7538f256d0
-[!] Calling function with 0 args...
-[+] Return (Int): 10327
+[*] Mode: Local Execution (dlopen)
+[!] === Executing Step 1 (abs) ===
+[+] Target Offset: 0x00000000000e2b10 | Address: 0x0000007dfc7b6b10
+[+] Return (Int): 42
 ```
 
-### 3. Resolving Environment Strings (Pointer Dereferencing)
+### 3. Remote Function Invocation in a Running Process (Remote Mode)
+To attach to a running process (e.g., PID `24878`), execute `getpid()` inside its address space via `ptrace`, and cleanly resume the process:
+```bash
+sudo ./oscall -p 24878 libc.so getpid "->int"
+```
+**Output:**
+```text
+[*] Mode: Remote Attach (PID: 24878)
+[+] Target Base in PID 24878: 0x00000070c2a7c000
+[!] === Executing Step 1 (getpid) ===
+[+] Target Offset: 0x00000000000929e0 | Address: 0x00000070c2b0e9e0
+[+] Return (Int): 24878
+```
+
+### 4. Remote String Passing and Execution
+To pass a string argument to a function (`puts`) running inside another active process:
+```bash
+sudo ./oscall -p 24878 libc.so puts "s:Diagnostic Ping from oscall" "->int"
+```
+**Output:**
+```text
+[*] Mode: Remote Attach (PID: 24878)
+[+] Target Base in PID 24878: 0x00000070c2a7c000
+[!] === Executing Step 1 (puts) ===
+[+] Target Offset: 0x00000000000f5bf0 | Address: 0x00000070c2b71bf0
+[+] Return (Int): 0
+```
+
+### 5. Resolving Environment Strings (Pointer Dereferencing)
 To call `getenv("PATH")` which returns a memory address containing a string, and safely print the referenced string:
 ```bash
 ./oscall libc.so getenv s:PATH "->string"
@@ -150,19 +202,19 @@ To call `getenv("PATH")` which returns a memory address containing a string, and
 [+] Return (String): /sbin:/vendor/bin:/system/sbin:/system/bin
 ```
 
-### 4. Reading System Parameters (Output Reference Buffer)
+### 6. Reading System Parameters (Output Reference Buffer)
 To call functions that expect an allocated structure or pointer to write their output directly into:
 ```bash
 ./oscall libc.so gethostname o:string 512
 ```
 
-### 5. Stateful C++ Class Instantiation and Method Invocation (Chained Call)
+### 7. Stateful C++ Class Instantiation and Method Invocation (Chained Call)
 To call C++ non-static member functions, allocate memory for the object, invoke the constructor to initialize it, and then call member functions by passing the initialized pointer as `this` (`x0` register) in a single run:
 ```bash
 ./oscall libfoo.so _ZN3FooC1Ev alloc:my_obj:512 :: _ZN3Foo7executeEii p:my_obj 10 20
 ```
 
-### 6. Inspecting and Overwriting Global Library Configurations (Dynamic Parameter Tuning)
+### 8. Inspecting and Overwriting Global Library Configurations (Dynamic Parameter Tuning)
 To read, patch, and verify the memory space of a global library parameter struct without rebuilding or modifying files on disk:
 ```bash
 ./oscall libfoo.so dump_sym:global_paras:32 :: set_sym:global_paras:16:float:0.85 :: dump_sym:global_paras:32
@@ -183,8 +235,8 @@ To read, patch, and verify the memory space of a global library parameter struct
     0x10: 9a 99 59 3f 00 00 a0 40 00 00 70 42 00 00 48 43  | ..Y?...@..pB..HC
 ```
 
-### 7. Complex Stateful Orchestration & Struct Building (Time Conversion Pipeline)
-To prove full end-to-end capabilities, we can allocate space for a POSIX time structure (`struct tm`), populate a raw time buffer, convert it, and format it as a formatted string—all in a single shell run:
+### 9. Complex Stateful Orchestration & Struct Building (Time Conversion Pipeline)
+To prove full end-to-end capabilities, we can allocate space for a POSIX time structure (`struct tm`), populate a raw time buffer, convert it, and format it as a formatted string-all in a single shell run:
 ```bash
 ./oscall libc.so \
   alloc:t:8 :: \
