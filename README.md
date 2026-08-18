@@ -241,7 +241,7 @@ To read, patch, and verify the memory space of a global library parameter struct
 ```
 
 ### 9. Complex Stateful Orchestration & Struct Building (Time Conversion Pipeline)
-To prove full end-to-end capabilities, we can allocate space for a POSIX time structure (`struct tm`), populate a raw time buffer, convert it, and format it as a formatted string—all in a single shell run:
+To prove full end-to-end capabilities, we can allocate space for a POSIX time structure (`struct tm`), populate a raw time buffer, convert it, and format it as a formatted string all in a single shell run:
 ```bash
 ./oscall libc.so \
   alloc:t:8 :: \
