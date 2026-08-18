@@ -2,48 +2,50 @@
 
 A native, low-level CLI utility written in V for inspecting, loading, and dynamically executing arbitrary C/C++ functions, as well as inspecting and patching memory of symbols within shared libraries (`.so`) on Linux and Android (both 32-bit and 64-bit) environments.
 
-`oscall` operates in two distinct operational modes: **Local In-Process Execution** (via `dlopen` and direct memory mapping) and **Remote Process Invocation** (via `ptrace` and cross-architecture register hijacking). It is designed for platform developers, baseband/telephony diagnostic engineers, and security researchers who need to interact with internal, stripped, or dynamically registered vendor APIs directly from the command line without compiling custom wrapping code or deploying heavyweight instrumentation frameworks like Frida.
+`oscall` operates in two distinct operational modes: **Local In-Process Execution** (via `dlopen` and direct memory mapping) and **Remote Process Invocation** (via `ptrace` and cross-architecture register hijacking). It is designed for platform developers, baseband/telephony diagnostic engineers, and security researchers who need to interact with internal, stripped, or dynamically registered vendor APIs directly from the command line without compiling custom wrapping code, managing complex dynamic dependencies (100% zero-dependency), or deploying heavyweight instrumentation frameworks like Frida.
 
 ---
 
 ## Technical Overview
 
-`oscall` operates by bypassing traditional high-level JVM/Binder constraints and interfacing directly with the native execution layers. It bridges the gap between static binary analysis and active dynamic invocation across both isolated and live process contexts.
+`oscall` operates by bypassing traditional high-level JVM/Binder constraints and interfacing directly with native execution layers. It bridges the gap between static binary analysis and active dynamic invocation across both isolated and live process contexts.
 
 ### Execution Pipelines
 
 #### Mode A: Local In-Process Execution (`dlopen`)
-1. **Dynamic Loading:** The target library is mapped into the memory space of `oscall` using POSIX dynamic linking interfaces with automated recursive dependency resolution.
-2. **Memory Map Parsing:** The utility reads `/proc/self/maps` of its own active process to resolve the base virtual memory load address of the target library.
+1. **Recursive Dependency Resolution:** Prior to loading the target binary, `oscall` recursively traverses `DT_NEEDED` dynamic tags and pre-loads dependencies across standard platform paths (`/system/lib64/`, `/vendor/lib64/`, `/system_ext/`, `/odm/`, `/product/`, `hw/`, etc.) to prevent link-time resolution failures.
+2. **Dynamic Loading & Memory Map Parsing:** The target library is mapped into the memory space of `oscall` using POSIX dynamic linking interfaces. The utility inspects `/proc/self/maps` of its own active process to resolve the base virtual memory load address.
 3. **Architecture Detection & ELF Parsing:** It reads the ELF class identifier from the physical binary, dynamically adapts to parse either ELF32 or ELF64 structures, and traverses the Section Headers.
 4. **Symbol Table Fallback:** It scans the static symbol table (`.symtab`). If the binary has been stripped, it automatically falls back to parsing the dynamic symbol table (`.dynsym`).
 5. **Absolute Pointer Resolution:** By matching the target symbol, it extracts the relative file offset and combines it with the base memory map address (`Base Address + Offset`), bypassing `dlsym` limitations on unexported or local C++ symbols (e.g., `_ZL` static functions).
 6. **Execution Pipeline Chaining:** Using the execution delimiter (`::`), the utility decomposes the CLI instructions into sequential steps, executing them within a single active process run.
-7. **Dynamic ABI Casting & Output Formatting:** Based on user-provided CLI arguments, it dynamically casts the absolute memory pointer to a corresponding function signature (from 0 to 12 arguments), triggers execution, and intercepts the return value to cast it into the specified output format.
+7. **Dynamic ABI Casting & Output Formatting:** Based on user-provided CLI arguments, it dynamically casts the absolute memory pointer to a corresponding function signature, triggers execution (routing pointers, integers, and floating-point values), and intercepts the return value to cast it into the specified output format.
 8. **Fault Tolerance & State Safety:** Signal handlers (`SIGSEGV`, `SIGBUS`) wrapped around `sigsetjmp` / `siglongjmp` intercept memory access violations safely, preventing unhandled runner crashes.
 
 #### Mode B: Remote Process Invocation (`ptrace` / `-p <pid>`)
 1. **Remote Base Resolution:** Reads `/proc/<PID>/maps` of the target active process to pinpoint the live virtual memory load base of the target module.
 2. **Non-Invasive Process Attachment:** Attaches to the remote thread via `PTRACE_ATTACH`, synchronizes with `waitpid`, and captures the complete CPU register state (`PTRACE_GETREGSET` / `PTRACE_GETREGS`).
-3. **Cross-Architecture Register Staging:** Automatically selects and configures the target ABI calling convention:
-   - **AArch64:** Arguments mapped to registers `X0`-`X7`; stack frame aligned to 16 bytes; Link Register (`X30` / `LR`) set to a trapping return address (`0x0`).
-   - **x86_64:** Arguments mapped to `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9`; dummy return address pushed to stack; `RIP` pointed to the target function.
-   - **ARM32:** Arguments mapped to `R0`-`R3`; stack frame aligned to 8 bytes; `LR` set to `0x0`.
+3. **Hardware FPU & Cross-Architecture Register Staging:** Automatically selects and configures the target ABI calling convention, staging both general-purpose and vector/FPU registers:
+   - **AArch64:** General arguments mapped to `X0`-`X7`; floating-point/double arguments staged into vector registers `V0`-`V7` (`D0`-`D7`) via `NT_PRFPREG`; stack frame aligned to 16 bytes; Link Register (`X30` / `LR`) set to a trapping return address (`0x0`).
+   - **x86_64:** General arguments mapped to `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9`; floating-point arguments staged into SSE registers `XMM0`-`XMM7` via `PTRACE_SETFPREGS`; dummy return address pushed to stack; `RIP` pointed to the target function.
+   - **ARM32:** General arguments mapped to `R0`-`R3`; floating-point arguments staged into VFP registers `D0`-`D7` via `NT_ARM_VFP`; stack frame aligned to 8 bytes; `LR` set to `0x0`.
    - **i386:** Arguments pushed directly onto the stack in accordance with standard `cdecl`.
 4. **Kernel-Level Remote Memory Staging:** Writes string buffers and complex arguments directly into the target process stack/scratch space using Linux `process_vm_writev` with an automated fallback to `PTRACE_POKEDATA`.
-5. **Execution & Return Interception:** Resumes execution via `PTRACE_CONT` until the return address triggers a trap. `oscall` intercepts the signal, harvests the return register (`X0`, `RAX`, or `R0`), fully restores the original CPU context, and cleanly detaches (`PTRACE_DETACH`) without altering a single byte of the target process's code segment.
+5. **Execution & Return Interception:** Resumes execution via `PTRACE_CONT` until the return address triggers a trap. `oscall` intercepts the signal, harvests the return value from the corresponding scalar register (`X0`, `RAX`, `R0`) or vector FPU register (`D0`/`V0`, `XMM0`), fully restores the original CPU context, and cleanly detaches (`PTRACE_DETACH`) without altering a single byte of the target process's code segment.
 
 ---
 
 ## Key Features
 
 - **Dual Execution Engine:** Supports standalone local invocation (`dlopen`) and non-destructive remote process invocation (`ptrace`).
+- **Hardware FPU & Vector Register Hijacking:** Native pass-through and extraction of single-precision (`f32` / `float`) and double-precision (`f64` / `double`) floating-point types in both local and remote execution modes.
+- **Zero External Dependencies:** 100% self-contained codebase without requiring external dynamic libraries (e.g., `libffi`). Compiles cleanly on Android NDK, Alpine/Musl, and standard Linux glibc environments.
 - **Cross-Architecture Support:** Built-in multi-architecture engine supporting **AArch64**, **ARM32**, **x86_64**, and **i386** calling conventions.
 - **Multi-Arch ELF Parser:** Low-level ELF parser supporting both 32-bit (ELF32) and 64-bit (ELF64) symbol matching and extraction from `.symtab` and `.dynsym`.
 - **Zero-Modification Remote Execution:** Executes functions within live, running daemons (e.g., Android `rild`, native vendor services) without code hooking, memory patching, or binary tampering.
 - **Direct Syscall Memory Engine:** Employs raw kernel syscalls (`__NR_process_vm_readv` / `__NR_process_vm_writev`) for fast remote memory transfers with POSIX `ptrace` fallbacks.
-- **Dynamic ABI Binder:** Call delegates supporting up to 12 arguments mapping to standard platform calling conventions.
-- **On-the-fly Return Formatting:** Casts and prints return values dynamically using runtime format indicators (`->int`, `->string`, `->bool`, `->hex`).
+- **Dynamic ABI Binder:** Call delegates supporting standard platform calling conventions.
+- **On-the-fly Return Formatting:** Casts and prints return values dynamically using runtime format indicators (`->int`, `->string`, `->float`, `->double`, `->bool`, `->hex`).
 - **Symbol Enumeration:** Quick directory/listing of all exported and internal symbols of any mapped library (`--list`).
 - **Chained Execution Pipeline:** Sequential execution of multiple native functions or memory manipulation steps using the `::` delimiter.
 - **Stateful Memory Binding:** Persistent heap allocation (`alloc:`) and reference tracking (`p:`) to simulate complex object initialization and lifecycle management.
@@ -89,12 +91,14 @@ oscall <lib_name_or_path> --list
 
 ### Argument Prefixes and Types
 
-`oscall` treats command-line arguments as register values (`voidptr` / `uintptr_t`). To define pointers, strings, or buffers, use the following syntax:
+`oscall` treats command-line arguments as register values (`voidptr` / `uintptr_t` / `float` / `double`). To define pointers, strings, floating-point numbers, or buffers, use the following syntax:
 
 | Prefix | Example | Description |
 | :--- | :--- | :--- |
-| *(None)* | `123` / `-42` | Passed as a raw integer. |
+| *(None)* | `123` / `-42` | Passed as a raw signed/unsigned integer. |
 | `0x...` | `0x7a41` | Parsed as a hexadecimal value and loaded directly into the argument register. |
+| `f:` | `f:3.14` | Parsed as an IEEE 754 single-precision float (`f32`) and loaded into FPU registers (`S0`-`S7` / `XMM0`-`XMM7`). |
+| `d:` | `d:144.0` | Parsed as an IEEE 754 double-precision float (`f64`) and loaded into FPU registers (`D0`-`D7` / `XMM0`-`XMM7`). |
 | `p:` | `p:0x7a41` | Parsed as a hex address and passed as a raw memory pointer. Use `p:0x0` for `nullptr`. |
 | `s:` | `s:my_text` | Allocates a null-terminated C-string (locally or in remote stack) and passes its pointer. |
 | `alloc:name:size` | `alloc:my_buf:64` | Allocates a persistent `size`-byte buffer on the heap, registered under `name`, and passes its pointer. |
@@ -126,15 +130,17 @@ When used as discrete commands (separated by `::`), pseudo-steps manage memory l
 
 ### Return Value Formatting
 
-To interpret and display the return value of a step, append one of the following formatting flags to the arguments. 
+To interpret and display the return value of a step, append one of the following formatting flags to the arguments.
 
 *(Note: Always wrap formatting flags in quotes like `"->string"` or escape them as `-\>string` to prevent the shell from interpreting the `>` character as an output redirection).*
 
 | Flag | Example | Description |
 | :--- | :--- | :--- |
 | `"->hex"` | `"->hex"` | Interprets the return value as a raw hexadecimal address/value (Default). |
-| `"->string"` | `"->string"` | Safely dereferences the return pointer and prints it as a null-terminated C-string. |
+| `"->string"` / `"->str"` | `"->string"` | Safely dereferences the return pointer and prints it as a null-terminated C-string. |
 | `"->int"` | `"->int"` | Interprets the return value as a signed 64-bit integer (`int64`). |
+| `"->float"` / `"->f32"` | `"->float"` | Interprets and bit-casts the return register as a single-precision float (`f32`). |
+| `"->double"` / `"->f64"` | `"->double"` | Interprets and bit-casts the return register as a double-precision float (`f64`). |
 | `"->bool"` | `"->bool"` | Evaluates the return value as a boolean (`true`/`false`). |
 
 ---
@@ -195,10 +201,9 @@ To call `getenv("PATH")` which returns a memory address containing a string, and
 ```
 **Output:**
 ```text
+[*] Mode: Local Execution (dlopen)
 [!] === Executing Step 1 (getenv) ===
-[+] Symbol Offset: 0x00000000000db4a0
-[+] Target Memory Address: 0x7538f1b4a0
-[!] Calling function with 1 args...
+[+] Target Offset: 0x00000000000db4a0 | Address: 0x0000007538f1b4a0
 [+] Return (String): /sbin:/vendor/bin:/system/sbin:/system/bin
 ```
 
@@ -236,7 +241,7 @@ To read, patch, and verify the memory space of a global library parameter struct
 ```
 
 ### 9. Complex Stateful Orchestration & Struct Building (Time Conversion Pipeline)
-To prove full end-to-end capabilities, we can allocate space for a POSIX time structure (`struct tm`), populate a raw time buffer, convert it, and format it as a formatted string-all in a single shell run:
+To prove full end-to-end capabilities, we can allocate space for a POSIX time structure (`struct tm`), populate a raw time buffer, convert it, and format it as a formatted string—all in a single shell run:
 ```bash
 ./oscall libc.so \
   alloc:t:8 :: \
@@ -251,8 +256,7 @@ To prove full end-to-end capabilities, we can allocate space for a POSIX time st
 **Output:**
 ```text
 [!] === Executing Step 4 (localtime_r) ===
-[+] Symbol Offset: 0x00000000000e7ad0
-[!] Calling function with 2 args...
+[+] Target Offset: 0x00000000000e7ad0 | Address: 0x0000007719166d20
 [+] Return (Hex): 0x0000007719166d20
 
 [!] === Executing Step 5 (dump:tm:40) ===
@@ -262,13 +266,39 @@ To prove full end-to-end capabilities, we can allocate space for a POSIX time st
     0x20: 00 00 00 00 00 00 00 00                          | ........
 
 [!] === Executing Step 7 (strftime) ===
-[!] Calling function with 4 args...
 [+] Return (Hex): 0x0000000000000013
 
 [!] === Executing Step 8 (dump:out:32) ===
 [+] Pseudo-step: Hex/ASCII dump of `out` (32 bytes):
     0x00: 32 30 32 36 2d 30 38 2d 30 39 5f 31 33 3a 34 34  | 2026-08-09_13:44
     0x10: 3a 31 35 00 00 00 00 00 00 00 00 00 00 00 00 00  | :15.............
+```
+
+### 10. Hardware Floating-Point Evaluation (Local Mode)
+To evaluate mathematical routines requiring IEEE 754 double-precision register routing (`D0`/`XMM0`):
+```bash
+./oscall libm.so sqrt d:144.0 "->double"
+```
+**Output:**
+```text
+[*] Mode: Local Execution (dlopen)
+[!] === Executing Step 1 (sqrt) ===
+[+] Target Offset: 0x0000000000025d80 | Address: 0x0000007879ba8d80
+[+] Return (Double): 12.0
+```
+
+### 11. Remote Floating-Point Function Invocation (Vector Register Hijacking)
+To execute multi-argument mathematical routines (`pow(2.0, 8.0)`) inside another active process using live FPU register staging (`V0`-`V7`):
+```bash
+sudo ./oscall -p 24878 libm.so pow d:2.0 d:8.0 "->double"
+```
+**Output:**
+```text
+[*] Mode: Remote Attach (PID: 24878)
+[+] Target Base in PID 24878: 0x00000070c2a7c000
+[!] === Executing Step 1 (pow) ===
+[+] Target Offset: 0x0000000000034f50 | Address: 0x00000070c2baeef0
+[+] Return (Double): 256.0
 ```
 
 ---
