@@ -16,10 +16,10 @@
 #include <sys/user.h>
 #include <sys/uio.h>
 #include <sys/syscall.h>
-#include <linux/elf.h>
+#include <elf.h>
 
-#if defined(__x86_64__) || defined(__i386__)
-#include <sys/reg.h>
+#if defined(__aarch64__) || defined(__arm__)
+#include <asm/ptrace.h>
 #endif
 
 #ifndef NT_PRSTATUS
