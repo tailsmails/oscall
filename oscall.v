@@ -11,12 +11,17 @@ import time
 fn C.dlopen(filename &char, flags int) voidptr
 fn C.dlsym(handle voidptr, symbol &char) voidptr
 fn C.dlclose(handle voidptr) int
-fn C.memcpy(dest voidptr, src voidptr, n int) voidptr
-fn C.memset(dest voidptr, val int, n int) voidptr
+fn C.memcpy(dest voidptr, src voidptr, n usize) voidptr
+fn C.memset(dest voidptr, val int, n usize) voidptr
 fn C.free(ptr voidptr)
 fn C.signal(sig int, handler voidptr) voidptr
 fn C.v_segfault_handler(sig int)
 fn C.safe_sigsetjmp() int
+
+fn C.get_remote_module_base(pid int, module_name &char) u64
+fn C.remote_call_arch(pid int, func_addr u64, argc int, argv &u64) u64
+fn C.write_remote_mem(pid int, dst u64, src voidptr, len usize) int
+fn C.read_remote_mem(pid int, dst voidptr, src u64, len usize) int
 
 struct LocalBuffer {
 	ptr  voidptr
@@ -133,7 +138,7 @@ fn get_elf_soname(file_path string) string {
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
 		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return "" }
 		unsafe {
-			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
+			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf64_Ehdr))
 		}
 
 		sh_num := ehdr.e_shnum
@@ -146,7 +151,7 @@ fn get_elf_soname(file_path string) string {
 
 		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
 		unsafe {
-			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+			C.memcpy(shdrs.data, shdrs_bytes.data, usize(sh_num * sh_entsize))
 		}
 
 		mut dyn_shdr_idx := -1
@@ -175,7 +180,7 @@ fn get_elf_soname(file_path string) string {
 
 		mut dyn_entries := []Elf64_Dyn{len: int(dyn_entry_count)}
 		unsafe {
-			C.memcpy(dyn_entries.data, dyn_bytes.data, int(dyn_shdr.sh_size))
+			C.memcpy(dyn_entries.data, dyn_bytes.data, usize(dyn_shdr.sh_size))
 		}
 
 		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
@@ -199,7 +204,7 @@ fn get_elf_soname(file_path string) string {
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
 		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return "" }
 		unsafe {
-			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf32_Ehdr)))
+			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf32_Ehdr))
 		}
 
 		sh_num := ehdr.e_shnum
@@ -212,7 +217,7 @@ fn get_elf_soname(file_path string) string {
 
 		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
 		unsafe {
-			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+			C.memcpy(shdrs.data, shdrs_bytes.data, usize(sh_num * sh_entsize))
 		}
 
 		mut dyn_shdr_idx := -1
@@ -241,7 +246,7 @@ fn get_elf_soname(file_path string) string {
 
 		mut dyn_entries := []Elf32_Dyn{len: int(dyn_entry_count)}
 		unsafe {
-			C.memcpy(dyn_entries.data, dyn_bytes.data, int(dyn_shdr.sh_size))
+			C.memcpy(dyn_entries.data, dyn_bytes.data, usize(dyn_shdr.sh_size))
 		}
 
 		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
@@ -344,7 +349,7 @@ fn get_elf_dependencies(file_path string) []string {
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
 		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return deps }
 		unsafe {
-			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
+			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf64_Ehdr))
 		}
 
 		sh_num := ehdr.e_shnum
@@ -357,7 +362,7 @@ fn get_elf_dependencies(file_path string) []string {
 
 		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
 		unsafe {
-			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+			C.memcpy(shdrs.data, shdrs_bytes.data, usize(sh_num * sh_entsize))
 		}
 
 		mut dyn_shdr_idx := -1
@@ -386,7 +391,7 @@ fn get_elf_dependencies(file_path string) []string {
 
 		mut dyn_entries := []Elf64_Dyn{len: int(dyn_entry_count)}
 		unsafe {
-			C.memcpy(dyn_entries.data, dyn_bytes.data, int(dyn_shdr.sh_size))
+			C.memcpy(dyn_entries.data, dyn_bytes.data, usize(dyn_shdr.sh_size))
 		}
 
 		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
@@ -413,7 +418,7 @@ fn get_elf_dependencies(file_path string) []string {
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
 		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return deps }
 		unsafe {
-			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf32_Ehdr)))
+			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf32_Ehdr))
 		}
 
 		sh_num := ehdr.e_shnum
@@ -426,7 +431,7 @@ fn get_elf_dependencies(file_path string) []string {
 
 		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
 		unsafe {
-			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+			C.memcpy(shdrs.data, shdrs_bytes.data, usize(sh_num * sh_entsize))
 		}
 
 		mut dyn_shdr_idx := -1
@@ -455,7 +460,7 @@ fn get_elf_dependencies(file_path string) []string {
 
 		mut dyn_entries := []Elf32_Dyn{len: int(dyn_entry_count)}
 		unsafe {
-			C.memcpy(dyn_entries.data, dyn_bytes.data, int(dyn_shdr.sh_size))
+			C.memcpy(dyn_entries.data, dyn_bytes.data, usize(dyn_shdr.sh_size))
 		}
 
 		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
@@ -524,7 +529,7 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
 		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return 0 }
 		unsafe {
-			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
+			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf64_Ehdr))
 		}
 
 		sh_num := ehdr.e_shnum
@@ -541,7 +546,7 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 
 		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
 		unsafe {
-			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+			C.memcpy(shdrs.data, shdrs_bytes.data, usize(sh_num * sh_entsize))
 		}
 
 		mut sym_shdr_idx := -1
@@ -595,7 +600,7 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 
 		mut syms := []Elf64_Sym{len: int(sym_count)}
 		unsafe {
-			C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
+			C.memcpy(syms.data, syms_bytes.data, usize(sym_shdr.sh_size))
 		}
 
 		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
@@ -632,7 +637,7 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
 		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return 0 }
 		unsafe {
-			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf32_Ehdr)))
+			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf32_Ehdr))
 		}
 
 		sh_num := ehdr.e_shnum
@@ -649,7 +654,7 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 
 		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
 		unsafe {
-			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+			C.memcpy(shdrs.data, shdrs_bytes.data, usize(sh_num * sh_entsize))
 		}
 
 		mut sym_shdr_idx := -1
@@ -703,7 +708,7 @@ fn find_elf_symbol_offset(file_path string, symbol_name string) u64 {
 
 		mut syms := []Elf32_Sym{len: int(sym_count)}
 		unsafe {
-			C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
+			C.memcpy(syms.data, syms_bytes.data, usize(sym_shdr.sh_size))
 		}
 
 		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
@@ -761,7 +766,7 @@ fn list_elf_symbols(file_path string) {
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
 		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return }
 		unsafe {
-			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf64_Ehdr)))
+			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf64_Ehdr))
 		}
 
 		sh_num := ehdr.e_shnum
@@ -778,7 +783,7 @@ fn list_elf_symbols(file_path string) {
 
 		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
 		unsafe {
-			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+			C.memcpy(shdrs.data, shdrs_bytes.data, usize(sh_num * sh_entsize))
 		}
 
 		mut sym_shdr_idx := -1
@@ -834,7 +839,7 @@ fn list_elf_symbols(file_path string) {
 
 		mut syms := []Elf64_Sym{len: int(sym_count)}
 		unsafe {
-			C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
+			C.memcpy(syms.data, syms_bytes.data, usize(sym_shdr.sh_size))
 		}
 
 		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
@@ -857,7 +862,7 @@ fn list_elf_symbols(file_path string) {
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
 		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return }
 		unsafe {
-			C.memcpy(&ehdr, ehdr_bytes.data, int(sizeof(Elf32_Ehdr)))
+			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf32_Ehdr))
 		}
 
 		sh_num := ehdr.e_shnum
@@ -874,7 +879,7 @@ fn list_elf_symbols(file_path string) {
 
 		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
 		unsafe {
-			C.memcpy(shdrs.data, shdrs_bytes.data, int(sh_num * sh_entsize))
+			C.memcpy(shdrs.data, shdrs_bytes.data, usize(sh_num * sh_entsize))
 		}
 
 		mut sym_shdr_idx := -1
@@ -930,7 +935,7 @@ fn list_elf_symbols(file_path string) {
 
 		mut syms := []Elf32_Sym{len: int(sym_count)}
 		unsafe {
-			C.memcpy(syms.data, syms_bytes.data, int(sym_shdr.sh_size))
+			C.memcpy(syms.data, syms_bytes.data, usize(sym_shdr.sh_size))
 		}
 
 		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
@@ -972,62 +977,32 @@ type Call5 = fn (voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 type Call6 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 type Call7 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 type Call8 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call9 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call10 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call11 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call12 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call13 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call14 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call15 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call16 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call17 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call18 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call19 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
-type Call20 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 
 fn main() {
 	if os.args.len < 3 {
 		println("Usage:")
-		println("  " + os.args[0] + " <lib_name_or_path> <symbol_name_or_substring> [arg1] [arg2] [arg3]...")
-		println("  " + os.args[0] + " <lib_name_or_path> <symbol_name> [args] :: <symbol_name_2> [args] :: ...")
-		println("  " + os.args[0] + " <lib_name_or_path> --list")
-		println("Arg prefixes:")
-		println("  123             -> Raw integer")
-		println("  s:text          -> Pointer to null-terminated C-string")
-		println("  p:0x123         -> Hex pointer address")
-		println("  alloc:name:size -> Allocate a local buffer of `size` bytes on heap and register it as `name`")
-		println("  p:name          -> Pass pointer of registered buffer `name` as argument")
-		println("  $1, $2...       -> Pass raw return value of Step 1, Step 2, etc.")
-		println("  p:$1, p:$2...   -> Pass pointer return value of Step 1, Step 2, etc.")
-		println("  o:int           -> Allocate local int buffer, print output")
-		println("  o:string        -> Allocate local 512-byte string buffer, print output")
-		println("Pseudo-steps (used as commands, e.g. cmd :: cmd):")
-		println("  sleep:ms                        -> Pause execution for specified milliseconds")
-		println("  alloc:name:size                 -> Pre-allocate a zero-initialized buffer on heap")
-		println("  set:name:offset:type:value      -> Write data into allocated buffer")
-		println("    Supported types: i8, i16, i32, i64, ptr, str, str_ptr")
-		println("  dump:name:size                  -> Print buffer hex/ASCII content safely with bounds check")
-		println("Return type format (append to arguments):")
-		println("  ->string        -> Print return value as C-string")
-		println("  ->int           -> Print return value as 64-bit integer")
-		println("  ->bool          -> Print return value as boolean")
-		println("  ->hex           -> Print return value as hex (default)")
+		println("  [Local Mode]:  " + os.args[0] + " <lib_name_or_path> <symbol_name> [args...]")
+		println("  [Remote Mode]: " + os.args[0] + " -p <pid> <lib_name_or_path> <symbol_name> [args...]")
+		println("  [Chaining]:    " + os.args[0] + " <lib_name_or_path> <sym1> [args] :: <sym2> [args] :: ...")
+		println("  [Symbol List]: " + os.args[0] + " <lib_name_or_path> --list")
 		return
 	}
 
-	mut lib_arg := os.args[1]
+	mut target_pid := 0
+	mut start_arg_idx := 1
+
+	if os.args[1] == "-p" || os.args[1] == "--pid" {
+		target_pid = os.args[2].int()
+		start_arg_idx = 3
+	}
+
+	mut lib_arg := os.args[start_arg_idx]
 	mut lib_path := lib_arg
 	if !lib_path.starts_with("/") {
 		lib_path = "/system/lib64/" + lib_arg
-		if !os.exists(lib_path) {
-			lib_path = "/system/lib/" + lib_arg
-		}
-		if !os.exists(lib_path) {
-			lib_path = "/vendor/lib64/" + lib_arg
-		}
-		if !os.exists(lib_path) {
-			lib_path = "/vendor/lib/" + lib_arg
-		}
+		if !os.exists(lib_path) { lib_path = "/system/lib/" + lib_arg }
+		if !os.exists(lib_path) { lib_path = "/vendor/lib64/" + lib_arg }
+		if !os.exists(lib_path) { lib_path = "/vendor/lib/" + lib_arg }
 	}
 
 	if !os.exists(lib_path) {
@@ -1035,31 +1010,44 @@ fn main() {
 		return
 	}
 
-	if os.args[2] == "--list" || os.args[2] == "-l" {
+	if os.args[start_arg_idx + 1] == "--list" || os.args[start_arg_idx + 1] == "-l" {
 		list_elf_symbols(lib_path)
 		return
 	}
 
-	mut loaded_map := map[string]bool{}
-	println("[*] Detecting dependencies from ELF headers...")
-	load_dependencies_recursive(lib_path, mut loaded_map)
+	mut base_addr := u64(0)
+	mut local_handle := voidptr(0)
 
-	handle := C.dlopen(&char(lib_path.str), 1)
-	if isnil(handle) {
-		println("[-] Error: Failed to load library " + lib_path)
-		return
-	}
+	if target_pid > 0 {
+		println("[*] Mode: Remote Attach (PID: $target_pid)")
+		module_short := os.file_name(lib_path)
+		base_addr = C.get_remote_module_base(target_pid, &char(module_short.str))
+		if base_addr == 0 {
+			println("[-] Error: Module `$module_short` not mapped in PID $target_pid")
+			return
+		}
+		println("[+] Target Base in PID $target_pid: 0x" + base_addr.hex_full())
+	} else {
+		println("[*] Mode: Local Execution (dlopen)")
+		mut loaded_map := map[string]bool{}
+		load_dependencies_recursive(lib_path, mut loaded_map)
 
-	base_addr := get_base_address(os.file_name(lib_path))
-	if base_addr == 0 {
-		println("[-] Error: Base address not found.")
-		C.dlclose(handle)
-		return
+		local_handle = C.dlopen(&char(lib_path.str), 1)
+		if isnil(local_handle) {
+			println("[-] Error: Failed to load library " + lib_path)
+			return
+		}
+		base_addr = get_base_address(os.file_name(lib_path))
+		if base_addr == 0 {
+			println("[-] Error: Base address not found.")
+			C.dlclose(local_handle)
+			return
+		}
 	}
 
 	mut steps := [][]string{}
 	mut current_step := []string{}
-	for i := 2; i < os.args.len; i++ {
+	for i := start_arg_idx + 1; i < os.args.len; i++ {
 		if os.args[i] == "::" {
 			if current_step.len > 0 {
 				steps << current_step
@@ -1086,9 +1074,7 @@ fn main() {
 			if parts.len >= 2 {
 				ms := parts[1].int()
 				time.sleep(ms * time.millisecond)
-				println('[+] Pseudo-step: Slept for ' + ms.str() + ' ms')
-			} else {
-				println("[-] Error: Invalid sleep syntax. Use: sleep:ms")
+				println('[+] Slept for ' + ms.str() + ' ms')
 			}
 			step_returns << voidptr(0)
 			continue
@@ -1101,322 +1087,36 @@ fn main() {
 				size := parts[2].int()
 				unsafe {
 					ptr := malloc(size)
-					if isnil(ptr) {
-						println("[-] Error: Allocation failed for `$name` ($size bytes)")
-						step_returns << voidptr(0)
-					} else {
-						C.memset(ptr, 0, size)
+					if !isnil(ptr) {
+						C.memset(ptr, 0, usize(size))
 						named_buffers[name] = LocalBuffer{ ptr: ptr, size: size }
-						println('[+] Pseudo-step: Pre-allocated buffer `' + name + '` (' + size.str() + ' bytes) at ' + ptr.str())
+						println('[+] Pre-allocated `' + name + '` (' + size.str() + ' bytes)')
 						step_returns << ptr
 					}
 				}
-			} else {
-				println("[-] Error: Invalid alloc syntax. Use: alloc:name:size")
-				step_returns << voidptr(0)
 			}
-			continue
-		}
-
-		if sym_name.starts_with("set:") {
-			parts := sym_name.split(":")
-			if parts.len >= 5 {
-				buf_name := parts[1]
-				offset := parts[2].int()
-				val_type := parts[3]
-				val_str := parts[4..].join(":")
-
-				if buf_name in named_buffers {
-					buf_info := named_buffers[buf_name] or { LocalBuffer{} }
-					buf_ptr := buf_info.ptr
-					buf_size := buf_info.size
-					unsafe {
-						target_ptr := voidptr(u64(buf_ptr) + u64(offset))
-						mut valid_write := false
-						match val_type {
-							"i8", "char", "u8" {
-								if offset + 1 <= buf_size {
-									val := val_str.int()
-									*&u8(target_ptr) = u8(val)
-									valid_write = true
-									println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into `' + buf_name + '` at offset ' + offset.str())
-								}
-							}
-							"i16", "short", "u16" {
-								if offset + 2 <= buf_size {
-									val := val_str.int()
-									*&u16(target_ptr) = u16(val)
-									valid_write = true
-									println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into `' + buf_name + '` at offset ' + offset.str())
-								}
-							}
-							"i32", "int", "u32" {
-								if offset + 4 <= buf_size {
-									val := val_str.int()
-									*&u32(target_ptr) = u32(val)
-									valid_write = true
-									println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into `' + buf_name + '` at offset ' + offset.str())
-								}
-							}
-							"i64", "long", "u64" {
-								if offset + 8 <= buf_size {
-									mut val := u64(0)
-									if val_str.starts_with("0x") {
-										val = strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
-									} else {
-										val = strconv.parse_uint(val_str, 10, 64) or { 0 }
-									}
-									*&u64(target_ptr) = val
-									valid_write = true
-									println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into `' + buf_name + '` at offset ' + offset.str())
-								}
-							}
-							"ptr" {
-								if offset + int(sizeof(voidptr)) <= buf_size {
-									mut ptr_val := voidptr(0)
-									if val_str in named_buffers {
-										ptr_val = (named_buffers[val_str] or { LocalBuffer{} }).ptr
-									} else if val_str.starts_with("0x") {
-										hex_val := strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
-										ptr_val = voidptr(hex_val)
-									} else if val_str.starts_with("$") {
-										ref_idx := val_str.substr(1, val_str.len).int() - 1
-										if ref_idx >= 0 && ref_idx < step_returns.len {
-											ptr_val = step_returns[ref_idx]
-										}
-									}
-									*&voidptr(target_ptr) = ptr_val
-									valid_write = true
-									println('[+] Pseudo-step: Written pointer (' + ptr_val.str() + ') into `' + buf_name + '` at offset ' + offset.str())
-								}
-							}
-							"str" {
-								str_len := val_str.len
-								if offset + str_len + 1 <= buf_size {
-									C.memcpy(target_ptr, val_str.str, str_len)
-									*&u8(voidptr(u64(target_ptr) + u64(str_len))) = 0
-									valid_write = true
-									println('[+] Pseudo-step: Copied raw string "' + val_str + '" into `' + buf_name + '` at offset ' + offset.str())
-								}
-							}
-							"str_ptr" {
-								if offset + int(sizeof(voidptr)) <= buf_size {
-									str_ptr := val_str.str
-									*&voidptr(target_ptr) = voidptr(str_ptr)
-									valid_write = true
-									println('[+] Pseudo-step: Written string pointer (' + voidptr(str_ptr).str() + ') to "' + val_str + '" into `' + buf_name + '` at offset ' + offset.str())
-								}
-							}
-							else {}
-						}
-
-						if !valid_write {
-							println("[-] Error: Out of bounds write blocked on `$buf_name` at offset $offset for type $val_type. Buffer size is $buf_size.")
-						}
-					}
-				} else {
-					println("[-] Error: Target buffer `$buf_name` has not been allocated.")
-				}
-			} else {
-				println("[-] Error: Invalid set syntax. Use: set:buf_name:offset:type:value")
-			}
-			step_returns << voidptr(0)
-			continue
-		}
-
-		if sym_name.starts_with("dump:") {
-			parts := sym_name.split(":")
-			if parts.len >= 3 {
-				buf_name := parts[1]
-				mut size := parts[2].int()
-				if buf_name in named_buffers {
-					buf_info := named_buffers[buf_name] or { LocalBuffer{} }
-					buf_ptr := buf_info.ptr
-					buf_size := buf_info.size
-					if size > buf_size {
-						size = buf_size
-					}
-					unsafe {
-						println('[+] Pseudo-step: Hex/ASCII dump of `' + buf_name + '` (' + size.str() + ' bytes):')
-						for offset := 0; offset < size; offset += 16 {
-							mut hex_part := ""
-							mut ascii_part := ""
-							limit := if offset + 16 < size { offset + 16 } else { size }
-							for idx := offset; idx < limit; idx++ {
-								b := *&u8(voidptr(u64(buf_ptr) + u64(idx)))
-								hex_part += '${b:02x} '
-								if b >= 32 && b <= 126 {
-									ascii_part += b.ascii_str()
-								} else {
-									ascii_part += "."
-								}
-							}
-							if limit - offset < 16 {
-								padding_len := (16 - (limit - offset)) * 3
-								hex_part += " ".repeat(padding_len)
-							}
-							println("    0x${offset:02x}: " + hex_part + " | " + ascii_part)
-						}
-					}
-				} else {
-					println("[-] Error: Target buffer `$buf_name` has not been allocated.")
-				}
-			} else {
-				println("[-] Error: Invalid dump syntax. Use: dump:name:size")
-			}
-			step_returns << voidptr(0)
-			continue
-		}
-
-		if sym_name.starts_with("dump_sym:") {
-			parts := sym_name.split(":")
-			if parts.len >= 3 {
-				target_sym := parts[1]
-				mut size := parts[2].int()
-				sym_offset := find_elf_symbol_offset(lib_path, target_sym)
-				if sym_offset == 0 {
-					println("[-] Error: Symbol not found for dumping: " + target_sym)
-				} else {
-					sym_ptr := voidptr(base_addr + sym_offset)
-					unsafe {
-						println('[+] Pseudo-step: Hex/ASCII dump of symbol `' + target_sym + '` at ' + sym_ptr.str() + ' (' + size.str() + ' bytes):')
-						for offset := 0; offset < size; offset += 16 {
-							mut hex_part := ""
-							mut ascii_part := ""
-							limit := if offset + 16 < size { offset + 16 } else { size }
-							for idx := offset; idx < limit; idx++ {
-								b := *&u8(voidptr(u64(sym_ptr) + u64(idx)))
-								hex_part += '${b:02x} '
-								if b >= 32 && b <= 126 {
-									ascii_part += b.ascii_str()
-								} else {
-									ascii_part += "."
-								}
-							}
-							if limit - offset < 16 {
-								padding_len := (16 - (limit - offset)) * 3
-								hex_part += " ".repeat(padding_len)
-							}
-							println("    0x${offset:02x}: " + hex_part + " | " + ascii_part)
-						}
-					}
-				}
-			} else {
-				println("[-] Error: Invalid dump_sym syntax. Use: dump_sym:symbol_name:size")
-			}
-			step_returns << voidptr(0)
-			continue
-		}
-
-		if sym_name.starts_with("set_sym:") {
-			parts := sym_name.split(":")
-			if parts.len >= 5 {
-				target_sym := parts[1]
-				offset := parts[2].int()
-				val_type := parts[3]
-				val_str := parts[4..].join(":")
-
-				sym_offset := find_elf_symbol_offset(lib_path, target_sym)
-				if sym_offset == 0 {
-					println("[-] Error: Symbol not found for writing: " + target_sym)
-				} else {
-					sym_ptr := voidptr(base_addr + sym_offset)
-					unsafe {
-						target_ptr := voidptr(u64(sym_ptr) + u64(offset))
-						mut valid_write := false
-						match val_type {
-							"i8", "char", "u8" {
-								val := val_str.int()
-								*&u8(target_ptr) = u8(val)
-								valid_write = true
-							}
-							"i16", "short", "u16" {
-								val := val_str.int()
-								*&u16(target_ptr) = u16(val)
-								valid_write = true
-							}
-							"i32", "int", "u32" {
-								val := val_str.int()
-								*&u32(target_ptr) = u32(val)
-								valid_write = true
-							}
-							"i64", "long", "u64" {
-								mut val := u64(0)
-								if val_str.starts_with("0x") {
-									val = strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
-								} else {
-									val = strconv.parse_uint(val_str, 10, 64) or { 0 }
-								}
-								*&u64(target_ptr) = val
-								valid_write = true
-							}
-							"float", "f32" {
-								val := val_str.f32()
-								*&f32(target_ptr) = val
-								valid_write = true
-							}
-							else {}
-						}
-						if valid_write {
-							println('[+] Pseudo-step: Written ' + val_type + ' (' + val_str + ') into symbol `' + target_sym + '` at offset ' + offset.str())
-						} else {
-							println("[-] Error: Unsupported or invalid write type: " + val_type)
-						}
-					}
-				}
-			} else {
-				println("[-] Error: Invalid set_sym syntax. Use: set_sym:symbol_name:offset:type:value")
-			}
-			step_returns << voidptr(0)
 			continue
 		}
 
 		offset := find_elf_symbol_offset(lib_path, sym_name)
 		if offset == 0 {
-			println("[-] Error: Symbol not found in ELF headers: " + sym_name)
+			println("[-] Error: Symbol not found in ELF: " + sym_name)
 			break
 		}
 
-		println("[+] Symbol Offset: 0x" + offset.hex_full())
-		target_addr := voidptr(base_addr + offset)
-		println("[+] Target Memory Address: " + target_addr.str())
+		target_addr := base_addr + offset
+		println("[+] Target Offset: 0x" + offset.hex_full() + " | Address: 0x" + target_addr.hex_full())
 
 		mut args := []voidptr{}
-		mut out_buffers := []voidptr{}
-		mut out_types := []string{}
-		mut out_indices := []int{}
 		mut ret_format := "hex"
-		mut step_args := []string{}
 
 		for i := 1; i < step.len; i++ {
 			arg_str := step[i]
 			if arg_str.starts_with("->") {
 				ret_format = arg_str.substr(2, arg_str.len)
-			} else {
-				step_args << arg_str
-			}
-		}
-
-		for i := 0; i < step_args.len; i++ {
-			arg_str := step_args[i]
-			if arg_str.starts_with("alloc:") {
-				parts := arg_str.split(":")
-				if parts.len >= 3 {
-					name := parts[1]
-					size := parts[2].int()
-					if name in named_buffers {
-						args << (named_buffers[name] or { LocalBuffer{} }).ptr
-					} else {
-						unsafe {
-							ptr := malloc(size)
-							C.memset(ptr, 0, size)
-							named_buffers[name] = LocalBuffer{ ptr: ptr, size: size }
-							args << ptr
-						}
-					}
-				} else {
-					args << voidptr(0)
-				}
+			} else if arg_str.starts_with("s:") {
+				val_str := arg_str.substr(2, arg_str.len)
+				args << voidptr(val_str.str)
 			} else if arg_str.starts_with("p:") {
 				val_str := arg_str.substr(2, arg_str.len)
 				if val_str in named_buffers {
@@ -1439,181 +1139,94 @@ fn main() {
 				} else {
 					args << voidptr(0)
 				}
-			} else if arg_str == "o:int" {
-				unsafe {
-					mut local_buf := &int(malloc(int(sizeof(int))))
-					if !isnil(local_buf) {
-						*local_buf = 0
-						args << voidptr(local_buf)
-						out_buffers << voidptr(local_buf)
-						out_types << "int"
-						out_indices << i
-					}
-				}
-			} else if arg_str == "o:string" {
-				unsafe {
-					mut local_buf := malloc(512)
-					if !isnil(local_buf) {
-						*&u8(local_buf) = 0
-						args << voidptr(local_buf)
-						out_buffers << voidptr(local_buf)
-						out_types << "string"
-						out_indices << i
-					}
-				}
-			} else if arg_str.starts_with("s:") {
-				val_str := arg_str.substr(2, arg_str.len)
-				args << voidptr(val_str.str)
 			} else {
 				args << voidptr(arg_str.int())
 			}
 		}
 
-		println("[!] Calling function with " + args.len.str() + " args...")
-		mut success := false
 		mut step_res := voidptr(0)
 
-		unsafe {
-			C.signal(11, voidptr(C.v_segfault_handler))
-			C.signal(7, voidptr(C.v_segfault_handler))
-			if C.safe_sigsetjmp() == 0 {
-				match args.len {
-					0 {
-						func := Call0(target_addr)
-						step_res = func()
-					}
-					1 {
-						func := Call1(target_addr)
-						step_res = func(args[0])
-					}
-					2 {
-						func := Call2(target_addr)
-						step_res = func(args[0], args[1])
-					}
-					3 {
-						func := Call3(target_addr)
-						step_res = func(args[0], args[1], args[2])
-					}
-					4 {
-						func := Call4(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3])
-					}
-					5 {
-						func := Call5(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4])
-					}
-					6 {
-						func := Call6(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5])
-					}
-					7 {
-						func := Call7(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
-					}
-					8 {
-						func := Call8(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
-					}
-					9 {
-						func := Call9(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
-					}
-					10 {
-						func := Call10(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
-					}
-					11 {
-						func := Call11(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
-					}
-					12 {
-						func := Call12(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
-					}
-					13 {
-						func := Call13(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
-					}
-					14 {
-						func := Call14(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13])
-					}
-					15 {
-						func := Call15(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14])
-					}
-					16 {
-						func := Call16(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15])
-					}
-					17 {
-						func := Call17(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16])
-					}
-					18 {
-						func := Call18(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
-					}
-					19 {
-						func := Call19(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
-					}
-					20 {
-						func := Call20(target_addr)
-						step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19])
-					}
-					else {
-						println("[-] Error: Unsupported number of arguments.")
-					}
-				}
-				success = true
-				match ret_format {
-					"string", "str" {
-						if u64(step_res) != 0 {
-							println("[+] Return (String): " + (&char(step_res)).vstring())
-						} else {
-							println("[+] Return (String): NULL")
+		if target_pid > 0 {
+			mut remote_args := []u64{}
+			for a in args {
+				remote_args << u64(a)
+			}
+			res := C.remote_call_arch(target_pid, target_addr, remote_args.len, remote_args.data)
+			step_res = voidptr(res)
+		} else {
+			unsafe {
+				C.signal(11, voidptr(C.v_segfault_handler))
+				C.signal(7, voidptr(C.v_segfault_handler))
+				if C.safe_sigsetjmp() == 0 {
+					match args.len {
+						0 {
+							func := Call0(voidptr(target_addr))
+							step_res = func()
+						}
+						1 {
+							func := Call1(voidptr(target_addr))
+							step_res = func(args[0])
+						}
+						2 {
+							func := Call2(voidptr(target_addr))
+							step_res = func(args[0], args[1])
+						}
+						3 {
+							func := Call3(voidptr(target_addr))
+							step_res = func(args[0], args[1], args[2])
+						}
+						4 {
+							func := Call4(voidptr(target_addr))
+							step_res = func(args[0], args[1], args[2], args[3])
+						}
+						5 {
+							func := Call5(voidptr(target_addr))
+							step_res = func(args[0], args[1], args[2], args[3], args[4])
+						}
+						6 {
+							func := Call6(voidptr(target_addr))
+							step_res = func(args[0], args[1], args[2], args[3], args[4], args[5])
+						}
+						7 {
+							func := Call7(voidptr(target_addr))
+							step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+						}
+						8 {
+							func := Call8(voidptr(target_addr))
+							step_res = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+						}
+						else {
+							println("[-] Error: Max 8 arguments supported.")
 						}
 					}
-					"int" {
-						println("[+] Return (Int): " + i64(step_res).str())
-					}
-					"bool" {
-						println("[+] Return (Bool): " + (u64(step_res) != 0).str())
-					}
-					else {
-						println("[+] Return (Hex): 0x" + u64(step_res).hex_full())
-					}
+				} else {
+					println("[-] Segmentation Fault captured safely.")
 				}
-			} else {
-				println("[-] Error: Execution was aborted due to a Segmentation Fault (SIGSEGV/SIGBUS).")
+				C.signal(11, voidptr(0))
+				C.signal(7, voidptr(0))
 			}
-			C.signal(11, voidptr(0))
-			C.signal(7, voidptr(0))
 		}
 
-		if u64(step_res) == 0xffffffff || u64(step_res) == 0xffffffffffffffff {
-			println("[-] Error: Step " + (step_idx + 1).str() + " failed (returned -1). Aborting chain to prevent crash.")
-			break
-		}
-		step_returns << step_res
-		if success {
-			for idx, buf in out_buffers {
-				unsafe {
-					if out_types[idx] == "int" {
-						println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (*&int(buf)).str())
-					} else if out_types[idx] == "string" {
-						println("[+] Output buffer at Argument #" + out_indices[idx].str() + " updated to: " + (&char(buf)).vstring())
-					}
+		match ret_format {
+			"string", "str" {
+				if u64(step_res) != 0 {
+					println("[+] Return (String): " + unsafe { (&char(step_res)).vstring() })
+				} else {
+					println("[+] Return (String): NULL")
 				}
 			}
-		} else {
-			break
+			"int" { println("[+] Return (Int): " + i64(step_res).str()) }
+			"bool" { println("[+] Return (Bool): " + (u64(step_res) != 0).str()) }
+			else { println("[+] Return (Hex): 0x" + u64(step_res).hex_full()) }
 		}
+
+		step_returns << step_res
 	}
 
 	for _, buf_info in named_buffers {
 		unsafe { free(buf_info.ptr) }
 	}
-	C.dlclose(handle)
+	if !isnil(local_handle) {
+		C.dlclose(local_handle)
+	}
 }
