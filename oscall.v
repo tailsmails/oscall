@@ -5,9 +5,7 @@ import strconv
 import time
 
 #flag -ldl
-#flag -lffi
 #include <dlfcn.h>
-#include <ffi.h>
 #include "helper.h"
 
 fn C.dlopen(filename &char, flags int) voidptr
@@ -20,41 +18,31 @@ fn C.signal(sig int, handler voidptr) voidptr
 fn C.v_segfault_handler(sig int)
 fn C.safe_sigsetjmp() int
 
-fn C.ffi_prep_cif(cif voidptr, abi int, nargs u32, rtype voidptr, atypes voidptr) int
-fn C.ffi_call(cif voidptr, fn_ptr voidptr, rvalue voidptr, avalue voidptr)
-
 fn C.get_remote_module_base(pid int, module_name &char) u64
 fn C.remote_call_arch(pid int, func_addr u64, argc int, argv &u64, is_fp int) u64
 fn C.write_remote_mem(pid int, dst u64, src voidptr, len usize) int
 fn C.read_remote_mem(pid int, dst voidptr, src u64, len usize) int
 
-enum ValueKind {
-	k_ptr
-	k_int
-	k_float
-	k_double
-}
-
-struct DynamicArg {
-mut:
-	kind  ValueKind
-	p_val voidptr
-	i_val i64
-	f_val f32
-	d_val f64
-}
-
-struct StepReturn {
-	kind  ValueKind
-	p_val voidptr
-	i_val i64
-	f_val f32
-	d_val f64
-}
+type Call0 = fn () voidptr
+type Call1 = fn (voidptr) voidptr
+type Call2 = fn (voidptr, voidptr) voidptr
+type Call3 = fn (voidptr, voidptr, voidptr) voidptr
+type Call4 = fn (voidptr, voidptr, voidptr, voidptr) voidptr
+type Call5 = fn (voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call6 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call7 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
+type Call8 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 
 struct LocalBuffer {
 	ptr  voidptr
 	size int
+}
+
+struct StepReturn {
+	p_val voidptr
+	i_val i64
+	f_val f32
+	d_val f64
 }
 
 struct Elf32_Ehdr {
@@ -1095,7 +1083,7 @@ fn main() {
 				time.sleep(ms * time.millisecond)
 				println('[+] Slept for ' + ms.str() + ' ms')
 			}
-			step_returns << StepReturn{ kind: .k_int, p_val: voidptr(0), i_val: 0 }
+			step_returns << StepReturn{ p_val: voidptr(0), i_val: 0 }
 			continue
 		}
 
@@ -1110,7 +1098,7 @@ fn main() {
 						C.memset(ptr, 0, usize(size))
 						named_buffers[name] = LocalBuffer{ ptr: ptr, size: size }
 						println('[+] Pre-allocated `' + name + '` (' + size.str() + ' bytes)')
-						step_returns << StepReturn{ kind: .k_ptr, p_val: ptr }
+						step_returns << StepReturn{ p_val: ptr }
 					}
 				}
 			}
@@ -1126,7 +1114,8 @@ fn main() {
 		target_addr := base_addr + offset
 		println("[+] Target Offset: 0x" + offset.hex_full() + " | Address: 0x" + target_addr.hex_full())
 
-		mut dynamic_args := []DynamicArg{}
+		mut args := []voidptr{}
+		mut remote_args := []u64{}
 		mut ret_format := "hex"
 
 		for i := 1; i < step.len; i++ {
@@ -1135,24 +1124,22 @@ fn main() {
 				ret_format = arg_str.substr(2, arg_str.len)
 			} else if arg_str.starts_with("s:") {
 				val_str := arg_str.substr(2, arg_str.len)
-				dynamic_args << DynamicArg{
-					kind: .k_ptr
-					p_val: voidptr(val_str.str)
-				}
+				args << voidptr(val_str.str)
+				remote_args << u64(val_str.str)
 			} else if arg_str.starts_with("f:") {
 				val_str := arg_str.substr(2, arg_str.len)
 				flt_val := val_str.f32()
-				dynamic_args << DynamicArg{
-					kind: .k_float
-					f_val: flt_val
-				}
+				mut u_val := u32(0)
+				unsafe { C.memcpy(&u_val, &flt_val, sizeof(f32)) }
+				args << voidptr(u64(u_val))
+				remote_args << u64(u_val)
 			} else if arg_str.starts_with("d:") {
 				val_str := arg_str.substr(2, arg_str.len)
 				dbl_val := val_str.f64()
-				dynamic_args << DynamicArg{
-					kind: .k_double
-					d_val: dbl_val
-				}
+				mut u_val := u64(0)
+				unsafe { C.memcpy(&u_val, &dbl_val, sizeof(f64)) }
+				args << voidptr(u_val)
+				remote_args << u_val
 			} else if arg_str.starts_with("p:") {
 				val_str := arg_str.substr(2, arg_str.len)
 				mut p_ptr := voidptr(0)
@@ -1167,36 +1154,23 @@ fn main() {
 					hex_val := strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
 					p_ptr = voidptr(hex_val)
 				}
-				dynamic_args << DynamicArg{
-					kind: .k_ptr
-					p_val: p_ptr
-				}
+				args << p_ptr
+				remote_args << u64(p_ptr)
 			} else if arg_str.starts_with("$") {
 				ref_idx := arg_str.substr(1, arg_str.len).int() - 1
 				if ref_idx >= 0 && ref_idx < step_returns.len {
-					prev := step_returns[ref_idx]
-					dynamic_args << DynamicArg{
-						kind: prev.kind
-						p_val: prev.p_val
-						i_val: prev.i_val
-						f_val: prev.f_val
-						d_val: prev.d_val
-					}
+					args << step_returns[ref_idx].p_val
+					remote_args << u64(step_returns[ref_idx].p_val)
 				} else {
-					dynamic_args << DynamicArg{
-						kind: .k_ptr
-						p_val: voidptr(0)
-					}
+					args << voidptr(0)
+					remote_args << 0
 				}
 			} else {
 				int_val := strconv.parse_int(arg_str, 10, 64) or {
 					i64(strconv.parse_uint(arg_str.replace("0x", ""), 16, 64) or { 0 })
 				}
-				dynamic_args << DynamicArg{
-					kind: .k_int
-					i_val: int_val
-					p_val: voidptr(int_val)
-				}
+				args << voidptr(int_val)
+				remote_args << u64(int_val)
 			}
 		}
 
@@ -1204,33 +1178,9 @@ fn main() {
 		mut ret_double := f64(0.0)
 		mut ret_float := f32(0.0)
 
+		is_fp := if ret_format in ["float", "f32", "double", "f64"] { 1 } else { 0 }
+
 		if target_pid > 0 {
-			mut remote_args := []u64{}
-			for a in dynamic_args {
-				match a.kind {
-					.k_float {
-						unsafe {
-							mut u_val := u32(0)
-							C.memcpy(&u_val, &a.f_val, sizeof(f32))
-							remote_args << u64(u_val)
-						}
-					}
-					.k_double {
-						unsafe {
-							mut u_val := u64(0)
-							C.memcpy(&u_val, &a.d_val, sizeof(f64))
-							remote_args << u_val
-						}
-					}
-					.k_int {
-						remote_args << u64(a.i_val)
-					}
-					.k_ptr {
-						remote_args << u64(a.p_val)
-					}
-				}
-			}
-			is_fp := if ret_format in ["float", "f32", "double", "f64"] { 1 } else { 0 }
 			res := C.remote_call_arch(target_pid, target_addr, remote_args.len, remote_args.data, is_fp)
 			ret_storage = res
 			unsafe {
@@ -1239,73 +1189,63 @@ fn main() {
 				C.memcpy(&ret_float, &u32_val, sizeof(f32))
 			}
 		} else {
+			mut step_res_local := voidptr(0)
 			unsafe {
-				mut cif_buf := [256]u8{}
-				cif_ptr := voidptr(&cif_buf[0])
-
-				mut ffi_arg_types := []voidptr{len: dynamic_args.len}
-				mut ffi_arg_values := []voidptr{len: dynamic_args.len}
-
-				for i, a in dynamic_args {
-					match a.kind {
-						.k_float {
-							ffi_arg_types[i] = voidptr(&C.ffi_type_float)
-							ffi_arg_values[i] = voidptr(&dynamic_args[i].f_val)
+				C.signal(11, voidptr(C.v_segfault_handler))
+				C.signal(7, voidptr(C.v_segfault_handler))
+				if C.safe_sigsetjmp() == 0 {
+					match args.len {
+						0 {
+							func := Call0(voidptr(target_addr))
+							step_res_local = func()
 						}
-						.k_double {
-							ffi_arg_types[i] = voidptr(&C.ffi_type_double)
-							ffi_arg_values[i] = voidptr(&dynamic_args[i].d_val)
+						1 {
+							func := Call1(voidptr(target_addr))
+							step_res_local = func(args[0])
 						}
-						.k_int {
-							ffi_arg_types[i] = voidptr(&C.ffi_type_sint64)
-							ffi_arg_values[i] = voidptr(&dynamic_args[i].i_val)
+						2 {
+							func := Call2(voidptr(target_addr))
+							step_res_local = func(args[0], args[1])
 						}
-						.k_ptr {
-							ffi_arg_types[i] = voidptr(&C.ffi_type_pointer)
-							ffi_arg_values[i] = voidptr(&dynamic_args[i].p_val)
+						3 {
+							func := Call3(voidptr(target_addr))
+							step_res_local = func(args[0], args[1], args[2])
+						}
+						4 {
+							func := Call4(voidptr(target_addr))
+							step_res_local = func(args[0], args[1], args[2], args[3])
+						}
+						5 {
+							func := Call5(voidptr(target_addr))
+							step_res_local = func(args[0], args[1], args[2], args[3], args[4])
+						}
+						6 {
+							func := Call6(voidptr(target_addr))
+							step_res_local = func(args[0], args[1], args[2], args[3], args[4], args[5])
+						}
+						7 {
+							func := Call7(voidptr(target_addr))
+							step_res_local = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+						}
+						8 {
+							func := Call8(voidptr(target_addr))
+							step_res_local = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+						}
+						else {
+							println("[-] Error: Max 8 arguments supported.")
 						}
 					}
-				}
-
-				mut rtype := voidptr(&C.ffi_type_pointer)
-				if ret_format in ["float", "f32"] {
-					rtype = voidptr(&C.ffi_type_float)
-				} else if ret_format in ["double", "f64"] {
-					rtype = voidptr(&C.ffi_type_double)
-				} else if ret_format in ["int", "i64", "i32"] {
-					rtype = voidptr(&C.ffi_type_sint64)
-				}
-
-				mut types_ptr := voidptr(0)
-				if ffi_arg_types.len > 0 {
-					types_ptr = voidptr(ffi_arg_types.data)
-				}
-				mut vals_ptr := voidptr(0)
-				if ffi_arg_values.len > 0 {
-					vals_ptr = voidptr(ffi_arg_values.data)
-				}
-
-				mut ret_ptr := voidptr(&ret_storage)
-				if ret_format in ["float", "f32"] {
-					ret_ptr = voidptr(&ret_float)
-				} else if ret_format in ["double", "f64"] {
-					ret_ptr = voidptr(&ret_double)
-				}
-
-				status := C.ffi_prep_cif(cif_ptr, int(C.FFI_DEFAULT_ABI), u32(dynamic_args.len), rtype, types_ptr)
-				if status == 0 {
-					C.signal(11, voidptr(C.v_segfault_handler))
-					C.signal(7, voidptr(C.v_segfault_handler))
-					if C.safe_sigsetjmp() == 0 {
-						C.ffi_call(cif_ptr, voidptr(target_addr), ret_ptr, vals_ptr)
-					} else {
-						println("[-] Segmentation Fault captured safely.")
-					}
-					C.signal(11, voidptr(0))
-					C.signal(7, voidptr(0))
 				} else {
-					println("[-] Error: ffi_prep_cif failed.")
+					println("[-] Segmentation Fault captured safely.")
 				}
+				C.signal(11, voidptr(0))
+				C.signal(7, voidptr(0))
+			}
+			ret_storage = u64(step_res_local)
+			unsafe {
+				C.memcpy(&ret_double, &ret_storage, sizeof(f64))
+				mut u32_val := u32(ret_storage)
+				C.memcpy(&ret_float, &u32_val, sizeof(f32))
 			}
 		}
 
@@ -1315,19 +1255,19 @@ fn main() {
 			"float", "f32" {
 				println("[+] Return (Float): " + ret_float.str())
 				step_res = StepReturn{
-					kind: .k_float
 					f_val: ret_float
 					d_val: f64(ret_float)
 					p_val: voidptr(ret_storage)
+					i_val: i64(ret_storage)
 				}
 			}
 			"double", "f64" {
 				println("[+] Return (Double): " + ret_double.str())
 				step_res = StepReturn{
-					kind: .k_double
 					d_val: ret_double
 					f_val: f32(ret_double)
 					p_val: voidptr(ret_storage)
+					i_val: i64(ret_storage)
 				}
 			}
 			"string", "str" {
@@ -1338,7 +1278,6 @@ fn main() {
 					println("[+] Return (String): NULL")
 				}
 				step_res = StepReturn{
-					kind: .k_ptr
 					p_val: res_p
 					i_val: i64(ret_storage)
 				}
@@ -1346,7 +1285,6 @@ fn main() {
 			"int", "i64", "i32" {
 				println("[+] Return (Int): " + i64(ret_storage).str())
 				step_res = StepReturn{
-					kind: .k_int
 					i_val: i64(ret_storage)
 					p_val: voidptr(ret_storage)
 				}
@@ -1354,7 +1292,6 @@ fn main() {
 			"bool" {
 				println("[+] Return (Bool): " + (ret_storage != 0).str())
 				step_res = StepReturn{
-					kind: .k_int
 					i_val: if ret_storage != 0 { 1 } else { 0 }
 					p_val: voidptr(ret_storage)
 				}
@@ -1362,7 +1299,6 @@ fn main() {
 			else {
 				println("[+] Return (Hex): 0x" + ret_storage.hex_full())
 				step_res = StepReturn{
-					kind: .k_ptr
 					p_val: voidptr(ret_storage)
 					i_val: i64(ret_storage)
 				}
