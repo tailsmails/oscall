@@ -26,9 +26,9 @@ A native, low-level CLI utility written in V for inspecting, loading, and dynami
 1. **Remote Base Resolution:** Reads `/proc/<PID>/maps` of the target active process to pinpoint the live virtual memory load base of the target module.
 2. **Non-Invasive Process Attachment:** Attaches to the remote thread via `PTRACE_ATTACH`, synchronizes with `waitpid`, and captures the complete CPU register state (`PTRACE_GETREGSET` / `PTRACE_GETREGS`).
 3. **Cross-Architecture Register Staging:** Automatically selects and configures the target ABI calling convention:
-   - **AArch64:** Arguments mapped to registers `X0`–`X7`; stack frame aligned to 16 bytes; Link Register (`X30` / `LR`) set to a trapping return address (`0x0`).
+   - **AArch64:** Arguments mapped to registers `X0`-`X7`; stack frame aligned to 16 bytes; Link Register (`X30` / `LR`) set to a trapping return address (`0x0`).
    - **x86_64:** Arguments mapped to `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9`; dummy return address pushed to stack; `RIP` pointed to the target function.
-   - **ARM32:** Arguments mapped to `R0`–`R3`; stack frame aligned to 8 bytes; `LR` set to `0x0`.
+   - **ARM32:** Arguments mapped to `R0`-`R3`; stack frame aligned to 8 bytes; `LR` set to `0x0`.
    - **i386:** Arguments pushed directly onto the stack in accordance with standard `cdecl`.
 4. **Kernel-Level Remote Memory Staging:** Writes string buffers and complex arguments directly into the target process stack/scratch space using Linux `process_vm_writev` with an automated fallback to `PTRACE_POKEDATA`.
 5. **Execution & Return Interception:** Resumes execution via `PTRACE_CONT` until the return address triggers a trap. `oscall` intercepts the signal, harvests the return register (`X0`, `RAX`, or `R0`), fully restores the original CPU context, and cleanly detaches (`PTRACE_DETACH`) without altering a single byte of the target process's code segment.
