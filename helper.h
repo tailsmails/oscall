@@ -13,14 +13,9 @@
 #include <signal.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
-#include <sys/user.h>
 #include <sys/uio.h>
 #include <sys/syscall.h>
-#include <linux/elf.h>
-
-#if defined(__x86_64__) || defined(__i386__)
-#include <sys/reg.h>
-#endif
+#include <elf.h>
 
 #ifndef NT_PRSTATUS
 #define NT_PRSTATUS 1
@@ -35,16 +30,48 @@
 #endif
 
 #if defined(__aarch64__)
+struct local_user_pt_regs {
+    uint64_t regs[31];
+    uint64_t sp;
+    uint64_t pc;
+    uint64_t pstate;
+};
 struct local_user_fpsimd_struct {
     uint64_t vregs[32][2];
     uint32_t fpsr;
     uint32_t fpcr;
     uint32_t __pad;
 };
+#elif defined(__x86_64__)
+struct local_user_regs_struct {
+    uint64_t r15, r14, r13, r12, rbp, rbx, r11, r10;
+    uint64_t r9, r8, rax, rcx, rdx, rsi, rdi, orig_rax;
+    uint64_t rip, cs, eflags, rsp, ss, fs_base, gs_base, ds, es, fs, gs;
+};
+struct local_user_fpregs_struct {
+    uint16_t cwd, swd, ftw, fop;
+    uint64_t rip, rdp;
+    uint32_t mxcsr, mxcsr_mask;
+    uint32_t st_space[32];
+    uint32_t xmm_space[64];
+    uint32_t padding[24];
+};
 #elif defined(__arm__)
+struct local_pt_regs {
+    long uregs[18];
+};
+#define ARM_r0 uregs[0]
+#define ARM_sp uregs[13]
+#define ARM_lr uregs[14]
+#define ARM_pc uregs[15]
+#define ARM_cpsr uregs[16]
 struct local_user_vfp {
     uint64_t fpregs[32];
     uint32_t fpscr;
+};
+#elif defined(__i386__)
+struct local_user_regs_struct_32 {
+    long ebx, ecx, edx, esi, edi, ebp, eax, xds, xes, xfs, xgs, orig_eax, eip, xcs, eflags, esp, xss;
 };
 #endif
 
@@ -140,7 +167,7 @@ static inline uintptr_t remote_call_arch(pid_t pid, uintptr_t func_addr, int arg
     waitpid(pid, &status, WUNTRACED);
 
 #if defined(__aarch64__)
-    struct user_pt_regs regs, orig_regs;
+    struct local_user_pt_regs regs, orig_regs;
     struct local_user_fpsimd_struct fpsimd, orig_fpsimd;
     struct iovec iov = { &regs, sizeof(regs) };
     struct iovec orig_iov = { &orig_regs, sizeof(orig_regs) };
@@ -202,8 +229,8 @@ static inline uintptr_t remote_call_arch(pid_t pid, uintptr_t func_addr, int arg
     return ret_val;
 
 #elif defined(__x86_64__)
-    struct user_regs_struct regs, orig_regs;
-    struct user_fpregs_struct fpregs, orig_fpregs;
+    struct local_user_regs_struct regs, orig_regs;
+    struct local_user_fpregs_struct fpregs, orig_fpregs;
 
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) == -1) goto fail;
     memcpy(&orig_regs, &regs, sizeof(regs));
@@ -265,7 +292,7 @@ static inline uintptr_t remote_call_arch(pid_t pid, uintptr_t func_addr, int arg
     return ret_val;
 
 #elif defined(__arm__)
-    struct pt_regs regs, orig_regs;
+    struct local_pt_regs regs, orig_regs;
     struct local_user_vfp vfp, orig_vfp;
     struct iovec iov = { &regs, sizeof(regs) };
     struct iovec orig_iov = { &orig_regs, sizeof(orig_regs) };
@@ -326,7 +353,7 @@ static inline uintptr_t remote_call_arch(pid_t pid, uintptr_t func_addr, int arg
     return ret_val;
 
 #elif defined(__i386__)
-    struct user_regs_struct regs, orig_regs;
+    struct local_user_regs_struct_32 regs, orig_regs;
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) == -1) goto fail;
     memcpy(&orig_regs, &regs, sizeof(regs));
 
