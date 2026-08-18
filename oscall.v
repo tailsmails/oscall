@@ -34,8 +34,9 @@ type Call7 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) 
 type Call8 = fn (voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr, voidptr) voidptr
 
 struct LocalBuffer {
-	ptr  voidptr
-	size int
+	ptr        voidptr
+	remote_ptr u64
+	size       int
 }
 
 struct StepReturn {
@@ -133,27 +134,42 @@ struct Elf32_Dyn {
 	d_val u32
 }
 
-fn get_elf_soname(file_path string) string {
-	if !os.exists(file_path) { return "" }
-	file_size := os.file_size(file_path)
-	if file_size < 52 { return "" }
+fn hex_to_bytes(hex_str string) []u8 {
+	clean := hex_str.replace('0x', '').replace(' ', '').replace(',', '').replace(':', '').replace('-', '')
+	mut bytes := []u8{}
+	for i := 0; i < clean.len; i += 2 {
+		if i + 2 <= clean.len {
+			b := strconv.parse_uint(clean[i..i + 2], 16, 8) or { 0 }
+			bytes << u8(b)
+		} else if i + 1 == clean.len {
+			b := strconv.parse_uint(clean[i..i + 1], 16, 8) or { 0 }
+			bytes << u8(b)
+		}
+	}
+	return bytes
+}
 
-	mut file := os.open(file_path) or { return "" }
+fn get_elf_soname(file_path string) string {
+	if !os.exists(file_path) { return '' }
+	file_size := os.file_size(file_path)
+	if file_size < 52 { return '' }
+
+	mut file := os.open(file_path) or { return '' }
 	defer { file.close() }
 
 	ident := file.read_bytes_at(16, 0)
-	if ident.len < 16 { return "" }
+	if ident.len < 16 { return '' }
 	if ident[0] != 0x7f || ident[1] != `E` || ident[2] != `L` || ident[3] != `F` {
-		return ""
+		return ''
 	}
 	class := ident[4]
-	if class != 1 && class != 2 { return "" }
+	if class != 1 && class != 2 { return '' }
 
 	if class == 2 {
-		if file_size < i64(sizeof(Elf64_Ehdr)) { return "" }
+		if file_size < i64(sizeof(Elf64_Ehdr)) { return '' }
 		mut ehdr := Elf64_Ehdr{}
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf64_Ehdr)), 0)
-		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return "" }
+		if ehdr_bytes.len < int(sizeof(Elf64_Ehdr)) { return '' }
 		unsafe {
 			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf64_Ehdr))
 		}
@@ -161,10 +177,10 @@ fn get_elf_soname(file_path string) string {
 		sh_num := ehdr.e_shnum
 		sh_entsize := ehdr.e_shentsize
 		if sh_entsize < sizeof(Elf64_Shdr) || sh_num == 0 || sh_num > 10000 {
-			return ""
+			return ''
 		}
 		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
-		if shdrs_bytes.len < int(sh_num * sh_entsize) { return "" }
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return '' }
 
 		mut shdrs := []Elf64_Shdr{len: int(sh_num)}
 		unsafe {
@@ -183,17 +199,17 @@ fn get_elf_soname(file_path string) string {
 		}
 
 		if dyn_shdr_idx == -1 || dynstr_shdr_idx == -1 {
-			return ""
+			return ''
 		}
 
 		dyn_shdr := shdrs[dyn_shdr_idx]
 		dynstr_shdr := shdrs[dynstr_shdr_idx]
 
 		dyn_entry_count := dyn_shdr.sh_size / sizeof(Elf64_Dyn)
-		if dyn_entry_count == 0 || dyn_entry_count > 10000 { return "" }
+		if dyn_entry_count == 0 || dyn_entry_count > 10000 { return '' }
 
 		dyn_bytes := file.read_bytes_at(int(dyn_shdr.sh_size), dyn_shdr.sh_offset)
-		if dyn_bytes.len < int(dyn_shdr.sh_size) { return "" }
+		if dyn_bytes.len < int(dyn_shdr.sh_size) { return '' }
 
 		mut dyn_entries := []Elf64_Dyn{len: int(dyn_entry_count)}
 		unsafe {
@@ -201,7 +217,7 @@ fn get_elf_soname(file_path string) string {
 		}
 
 		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
-		if dynstr.len < int(dynstr_shdr.sh_size) { return "" }
+		if dynstr.len < int(dynstr_shdr.sh_size) { return '' }
 
 		for entry in dyn_entries {
 			if entry.d_tag == 14 {
@@ -216,10 +232,10 @@ fn get_elf_soname(file_path string) string {
 			}
 		}
 	} else {
-		if file_size < i64(sizeof(Elf32_Ehdr)) { return "" }
+		if file_size < i64(sizeof(Elf32_Ehdr)) { return '' }
 		mut ehdr := Elf32_Ehdr{}
 		ehdr_bytes := file.read_bytes_at(int(sizeof(Elf32_Ehdr)), 0)
-		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return "" }
+		if ehdr_bytes.len < int(sizeof(Elf32_Ehdr)) { return '' }
 		unsafe {
 			C.memcpy(&ehdr, ehdr_bytes.data, sizeof(Elf32_Ehdr))
 		}
@@ -227,10 +243,10 @@ fn get_elf_soname(file_path string) string {
 		sh_num := ehdr.e_shnum
 		sh_entsize := ehdr.e_shentsize
 		if sh_entsize < sizeof(Elf32_Shdr) || sh_num == 0 || sh_num > 10000 {
-			return ""
+			return ''
 		}
 		shdrs_bytes := file.read_bytes_at(int(sh_num * sh_entsize), ehdr.e_shoff)
-		if shdrs_bytes.len < int(sh_num * sh_entsize) { return "" }
+		if shdrs_bytes.len < int(sh_num * sh_entsize) { return '' }
 
 		mut shdrs := []Elf32_Shdr{len: int(sh_num)}
 		unsafe {
@@ -249,17 +265,17 @@ fn get_elf_soname(file_path string) string {
 		}
 
 		if dyn_shdr_idx == -1 || dynstr_shdr_idx == -1 {
-			return ""
+			return ''
 		}
 
 		dyn_shdr := shdrs[dyn_shdr_idx]
 		dynstr_shdr := shdrs[dynstr_shdr_idx]
 
 		dyn_entry_count := dyn_shdr.sh_size / sizeof(Elf32_Dyn)
-		if dyn_entry_count == 0 || dyn_entry_count > 10000 { return "" }
+		if dyn_entry_count == 0 || dyn_entry_count > 10000 { return '' }
 
 		dyn_bytes := file.read_bytes_at(int(dyn_shdr.sh_size), dyn_shdr.sh_offset)
-		if dyn_bytes.len < int(dyn_shdr.sh_size) { return "" }
+		if dyn_bytes.len < int(dyn_shdr.sh_size) { return '' }
 
 		mut dyn_entries := []Elf32_Dyn{len: int(dyn_entry_count)}
 		unsafe {
@@ -267,7 +283,7 @@ fn get_elf_soname(file_path string) string {
 		}
 
 		dynstr := file.read_bytes_at(int(dynstr_shdr.sh_size), dynstr_shdr.sh_offset)
-		if dynstr.len < int(dynstr_shdr.sh_size) { return "" }
+		if dynstr.len < int(dynstr_shdr.sh_size) { return '' }
 
 		for entry in dyn_entries {
 			if entry.d_tag == 14 {
@@ -282,27 +298,27 @@ fn get_elf_soname(file_path string) string {
 			}
 		}
 	}
-	return ""
+	return ''
 }
 
 fn resolve_dependency_path(name string, base_dir string) string {
 	target_path := os.join_path(base_dir, name)
 	if os.exists(target_path) { return target_path }
 	std_paths := [
-		"/system/lib64/" + name,
-		"/vendor/lib64/" + name,
-		"/system_ext/lib64/" + name,
-		"/odm/lib64/" + name,
-		"/product/lib64/" + name,
-		"/vendor/lib64/hw/" + name,
-		"/system/lib64/hw/" + name,
-		"/system/lib/" + name,
-		"/vendor/lib/" + name,
-		"/system_ext/lib/" + name,
-		"/odm/lib/" + name,
-		"/product/lib/" + name,
-		"/vendor/lib/hw/" + name,
-		"/system/lib/hw/" + name,
+		'/system/lib64/' + name,
+		'/vendor/lib64/' + name,
+		'/system_ext/lib64/' + name,
+		'/odm/lib64/' + name,
+		'/product/lib64/' + name,
+		'/vendor/lib64/hw/' + name,
+		'/system/lib64/hw/' + name,
+		'/system/lib/' + name,
+		'/vendor/lib/' + name,
+		'/system_ext/lib/' + name,
+		'/odm/lib/' + name,
+		'/product/lib/' + name,
+		'/vendor/lib/hw/' + name,
+		'/system/lib/hw/' + name,
 	]
 	for p in std_paths {
 		if os.exists(p) { return p }
@@ -310,7 +326,7 @@ fn resolve_dependency_path(name string, base_dir string) string {
 
 	dir_files := os.ls(base_dir) or { []string{} }
 	for f in dir_files {
-		if f.ends_with(".so") {
+		if f.ends_with('.so') {
 			full_p := os.join_path(base_dir, f)
 			if get_elf_soname(full_p) == name {
 				return full_p
@@ -319,20 +335,20 @@ fn resolve_dependency_path(name string, base_dir string) string {
 	}
 
 	fallback_dirs := [
-		"/system/lib64/",
-		"/vendor/lib64/",
-		"/system_ext/lib64/",
-		"/odm/lib64/",
-		"/product/lib64/",
-		"/system/lib/",
-		"/vendor/lib/",
+		'/system/lib64/',
+		'/vendor/lib64/',
+		'/system_ext/lib64/',
+		'/odm/lib64/',
+		'/product/lib64/',
+		'/system/lib/',
+		'/vendor/lib/',
 	]
 	for d in fallback_dirs {
 		if d == base_dir { continue }
 		if !os.exists(d) { continue }
 		files_in_d := os.ls(d) or { []string{} }
 		for f in files_in_d {
-			if f.ends_with(".so") {
+			if f.ends_with('.so') {
 				full_p := os.join_path(d, f)
 				if get_elf_soname(full_p) == name {
 					return full_p
@@ -340,7 +356,7 @@ fn resolve_dependency_path(name string, base_dir string) string {
 			}
 		}
 	}
-	return ""
+	return ''
 }
 
 fn get_elf_dependencies(file_path string) []string {
@@ -506,20 +522,20 @@ fn load_dependencies_recursive(lib_path string, mut loaded_map map[string]bool) 
 	base_dir := os.dir(lib_path)
 	deps := get_elf_dependencies(lib_path)
 	for dep in deps {
-		if dep in ["libc.so", "libm.so", "libdl.so", "liblog.so"] { continue }
+		if dep in ['libc.so', 'libm.so', 'libdl.so', 'liblog.so'] { continue }
 		if dep in loaded_map { continue }
 		dep_path := resolve_dependency_path(dep, base_dir)
 		if dep_path.len > 0 {
 			load_dependencies_recursive(dep_path, mut loaded_map)
 			dep_handle := C.dlopen(&char(dep_path.str), 2 | 0x100)
 			if isnil(dep_handle) {
-				println("  [-] Warning: Failed to pre-load dependency: " + dep)
+				println('  [-] Warning: Failed to pre-load dependency: ' + dep)
 			} else {
 				loaded_map[dep] = true
-				println("  -> Found dependency: " + dep_path + " (Pre-loaded)")
+				println('  -> Found dependency: ' + dep_path + ' (Pre-loaded)')
 			}
 		} else {
-			println("  [-] Warning: Could not resolve path for dependency: " + dep)
+			println('  [-] Warning: Could not resolve path for dependency: ' + dep)
 		}
 	}
 }
@@ -825,11 +841,11 @@ fn list_elf_symbols(file_path string) {
 		}
 
 		if sym_shdr_idx == -1 || str_shdr_idx == -1 {
-			println("[-] Error: No symbol table found in ELF.")
+			println('[-] Error: No symbol table found in ELF.')
 			return
 		}
 		if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
-			println("[-] Error: Invalid section indices in ELF headers.")
+			println('[-] Error: Invalid section indices in ELF headers.')
 			return
 		}
 
@@ -862,7 +878,7 @@ fn list_elf_symbols(file_path string) {
 		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
 		if strtab.len < int(str_shdr.sh_size) { return }
 
-		println("[+] Total symbols found: " + sym_count.str())
+		println('[+] Total symbols found: ' + sym_count.str())
 		for sym in syms {
 			if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
 				mut end := int(sym.st_name)
@@ -870,7 +886,7 @@ fn list_elf_symbols(file_path string) {
 					end++
 				}
 				name := strtab[int(sym.st_name)..end].bytestr()
-				println("  0x" + sym.st_value.hex_full() + " : " + name)
+				println('  0x' + sym.st_value.hex_full() + ' : ' + name)
 			}
 		}
 	} else {
@@ -921,11 +937,11 @@ fn list_elf_symbols(file_path string) {
 		}
 
 		if sym_shdr_idx == -1 || str_shdr_idx == -1 {
-			println("[-] Error: No symbol table found in ELF.")
+			println('[-] Error: No symbol table found in ELF.')
 			return
 		}
 		if sym_shdr_idx >= shdrs.len || str_shdr_idx >= shdrs.len {
-			println("[-] Error: Invalid section indices in ELF headers.")
+			println('[-] Error: Invalid section indices in ELF headers.')
 			return
 		}
 
@@ -958,7 +974,7 @@ fn list_elf_symbols(file_path string) {
 		strtab := file.read_bytes_at(int(str_shdr.sh_size), str_shdr.sh_offset)
 		if strtab.len < int(str_shdr.sh_size) { return }
 
-		println("[+] Total symbols found: " + sym_count.str())
+		println('[+] Total symbols found: ' + sym_count.str())
 		for sym in syms {
 			if sym.st_name > 0 && sym.st_name < u32(strtab.len) {
 				mut end := int(sym.st_name)
@@ -966,17 +982,17 @@ fn list_elf_symbols(file_path string) {
 					end++
 				}
 				name := strtab[int(sym.st_name)..end].bytestr()
-				println("  0x" + sym.st_value.hex() + " : " + name)
+				println('  0x' + sym.st_value.hex() + ' : ' + name)
 			}
 		}
 	}
 }
 
 fn get_base_address(lib_name string) u64 {
-	lines := os.read_lines("/proc/self/maps") or { return 0 }
+	lines := os.read_lines('/proc/self/maps') or { return 0 }
 	for line in lines {
 		if line.contains(lib_name) {
-			parts := line.split("-")
+			parts := line.split('-')
 			if parts.len >= 2 {
 				return strconv.parse_uint(parts[0], 16, 64) or { 0 }
 			}
@@ -985,39 +1001,65 @@ fn get_base_address(lib_name string) u64 {
 	return 0
 }
 
+fn find_libc_malloc_remote(pid int) u64 {
+	libc_names := ['libc.so']
+	for l_name in libc_names {
+		base := C.get_remote_module_base(pid, &char(l_name.str))
+		if base > 0 {
+			paths := [
+				'/apex/com.android.runtime/lib64/bionic/libc.so',
+				'/system/lib64/libc.so',
+				'/apex/com.android.runtime/lib/bionic/libc.so',
+				'/system/lib/libc.so',
+				'/lib/aarch64-linux-gnu/libc.so.6',
+				'/lib/x86_64-linux-gnu/libc.so.6',
+			]
+			for p in paths {
+				if os.exists(p) {
+					off := find_elf_symbol_offset(p, 'malloc')
+					if off > 0 {
+						return base + off
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
 fn main() {
 	if os.args.len < 3 {
-		println("Usage:")
-		println("  [Local Mode]:  " + os.args[0] + " <lib_name_or_path> <symbol_name> [args...]")
-		println("  [Remote Mode]: " + os.args[0] + " -p <pid> <lib_name_or_path> <symbol_name> [args...]")
-		println("  [Chaining]:    " + os.args[0] + " <lib_name_or_path> <sym1> [args] :: <sym2> [args] :: ...")
-		println("  [Symbol List]: " + os.args[0] + " <lib_name_or_path> --list")
+		println('Usage:')
+		println('  [Local Mode]:  ' + os.args[0] + ' <lib_name_or_path> <symbol_name> [args...]')
+		println('  [Remote Mode]: ' + os.args[0] + ' -p <pid> <lib_name_or_path> <symbol_name> [args...]')
+		println('  [Chaining]:    ' + os.args[0] + ' <lib_name_or_path> <sym1> [args] :: <sym2> [args] :: ...')
+		println('  [Symbol List]: ' + os.args[0] + ' <lib_name_or_path> --list')
 		return
 	}
 
 	mut target_pid := 0
 	mut start_arg_idx := 1
 
-	if os.args[1] == "-p" || os.args[1] == "--pid" {
+	if os.args[1] == '-p' || os.args[1] == '--pid' {
 		target_pid = os.args[2].int()
 		start_arg_idx = 3
 	}
 
 	mut lib_arg := os.args[start_arg_idx]
 	mut lib_path := lib_arg
-	if !lib_path.starts_with("/") {
-		lib_path = "/system/lib64/" + lib_arg
-		if !os.exists(lib_path) { lib_path = "/system/lib/" + lib_arg }
-		if !os.exists(lib_path) { lib_path = "/vendor/lib64/" + lib_arg }
-		if !os.exists(lib_path) { lib_path = "/vendor/lib/" + lib_arg }
+	if !lib_path.starts_with('/') {
+		lib_path = '/system/lib64/' + lib_arg
+		if !os.exists(lib_path) { lib_path = '/system/lib/' + lib_arg }
+		if !os.exists(lib_path) { lib_path = '/vendor/lib64/' + lib_arg }
+		if !os.exists(lib_path) { lib_path = '/vendor/lib/' + lib_arg }
 	}
 
 	if !os.exists(lib_path) {
-		println("[-] Error: Library not found at: " + lib_path)
+		println('[-] Error: Library not found at: ' + lib_path)
 		return
 	}
 
-	if os.args[start_arg_idx + 1] == "--list" || os.args[start_arg_idx + 1] == "-l" {
+	if os.args[start_arg_idx + 1] == '--list' || os.args[start_arg_idx + 1] == '-l' {
 		list_elf_symbols(lib_path)
 		return
 	}
@@ -1026,27 +1068,27 @@ fn main() {
 	mut local_handle := voidptr(0)
 
 	if target_pid > 0 {
-		println("[*] Mode: Remote Attach (PID: ${target_pid})")
+		println('[*] Mode: Remote Attach (PID: ${target_pid})')
 		module_short := os.file_name(lib_path)
 		base_addr = C.get_remote_module_base(target_pid, &char(module_short.str))
 		if base_addr == 0 {
-			println("[-] Error: Module ${module_short} not mapped in PID ${target_pid}")
+			println('[-] Error: Module ${module_short} not mapped in PID ${target_pid}')
 			return
 		}
-		println("[+] Target Base in PID ${target_pid}: 0x" + base_addr.hex_full())
+		println('[+] Target Base in PID ${target_pid}: 0x' + base_addr.hex_full())
 	} else {
-		println("[*] Mode: Local Execution (dlopen)")
+		println('[*] Mode: Local Execution (dlopen)')
 		mut loaded_map := map[string]bool{}
 		load_dependencies_recursive(lib_path, mut loaded_map)
 
 		local_handle = C.dlopen(&char(lib_path.str), 1)
 		if isnil(local_handle) {
-			println("[-] Error: Failed to load library " + lib_path)
+			println('[-] Error: Failed to load library ' + lib_path)
 			return
 		}
 		base_addr = get_base_address(os.file_name(lib_path))
 		if base_addr == 0 {
-			println("[-] Error: Base address not found.")
+			println('[-] Error: Base address not found.')
 			C.dlclose(local_handle)
 			return
 		}
@@ -1055,7 +1097,7 @@ fn main() {
 	mut steps := [][]string{}
 	mut current_step := []string{}
 	for i := start_arg_idx + 1; i < os.args.len; i++ {
-		if os.args[i] == "::" {
+		if os.args[i] == '::' {
 			if current_step.len > 0 {
 				steps << current_step
 				current_step = []string{}
@@ -1074,10 +1116,10 @@ fn main() {
 	for step_idx, step in steps {
 		if step.len == 0 { continue }
 		sym_name := step[0]
-		println("\n[!] === Executing Step " + (step_idx + 1).str() + " (" + sym_name + ") ===")
+		println('\n[!] === Executing Step ' + (step_idx + 1).str() + ' (' + sym_name + ') ===')
 
-		if sym_name.starts_with("sleep:") {
-			parts := sym_name.split(":")
+		if sym_name.starts_with('sleep:') {
+			parts := sym_name.split(':')
 			if parts.len >= 2 {
 				ms := parts[1].int()
 				time.sleep(ms * time.millisecond)
@@ -1087,8 +1129,8 @@ fn main() {
 			continue
 		}
 
-		if sym_name.starts_with("alloc:") {
-			parts := sym_name.split(":")
+		if sym_name.starts_with('alloc:') {
+			parts := sym_name.split(':')
 			if parts.len >= 3 {
 				name := parts[1]
 				size := parts[2].int()
@@ -1096,67 +1138,153 @@ fn main() {
 					ptr := malloc(size)
 					if !isnil(ptr) {
 						C.memset(ptr, 0, usize(size))
-						named_buffers[name] = LocalBuffer{ ptr: ptr, size: size }
+						mut r_ptr := u64(0)
+						if target_pid > 0 {
+							malloc_remote_addr := find_libc_malloc_remote(target_pid)
+							if malloc_remote_addr > 0 {
+								sz_u64 := u64(size)
+								r_ptr = C.remote_call_arch(target_pid, malloc_remote_addr, 1, &sz_u64, 0)
+								if r_ptr != 0 {
+									zero_bytes := []u8{len: size, init: 0}
+									C.write_remote_mem(target_pid, r_ptr, zero_bytes.data, usize(size))
+									println('[+] Remote memory allocated at: 0x' + r_ptr.hex_full())
+								}
+							}
+						}
+						final_p_val := if target_pid > 0 && r_ptr != 0 { voidptr(r_ptr) } else { ptr }
+						named_buffers[name] = LocalBuffer{
+							ptr: ptr
+							remote_ptr: r_ptr
+							size: size
+						}
 						println('[+] Pre-allocated `' + name + '` (' + size.str() + ' bytes)')
-						step_returns << StepReturn{ p_val: ptr }
+						step_returns << StepReturn{ p_val: final_p_val, i_val: i64(r_ptr) }
 					}
 				}
 			}
 			continue
 		}
 
+		if sym_name.starts_with('write:') || sym_name.starts_with('w:') {
+			parts := sym_name.split(':')
+			if parts.len == 3 {
+				target := parts[1]
+				raw_hex := parts[2]
+				bytes := hex_to_bytes(raw_hex)
+				if target in named_buffers {
+					buf := named_buffers[target] or { LocalBuffer{} }
+					copy_len := if bytes.len > buf.size { buf.size } else { bytes.len }
+					unsafe {
+						C.memcpy(buf.ptr, bytes.data, usize(copy_len))
+					}
+					if target_pid > 0 && buf.remote_ptr != 0 {
+						C.write_remote_mem(target_pid, buf.remote_ptr, bytes.data, usize(copy_len))
+					}
+					println('[+] Wrote ' + copy_len.str() + ' bytes to `' + target + '`')
+				} else if target.starts_with('0x') {
+					addr := strconv.parse_uint(target.replace('0x', ''), 16, 64) or { 0 }
+					if target_pid > 0 {
+						C.write_remote_mem(target_pid, addr, bytes.data, usize(bytes.len))
+					} else {
+						unsafe { C.memcpy(voidptr(addr), bytes.data, usize(bytes.len)) }
+					}
+					println('[+] Wrote ' + bytes.len.str() + ' bytes to 0x' + addr.hex_full())
+				} else if target.starts_with('$') {
+					ref_idx := target.substr(1, target.len).int() - 1
+					if ref_idx >= 0 && ref_idx < step_returns.len {
+						p_addr := u64(step_returns[ref_idx].p_val)
+						if target_pid > 0 {
+							C.write_remote_mem(target_pid, p_addr, bytes.data, usize(bytes.len))
+						} else {
+							unsafe { C.memcpy(voidptr(p_addr), bytes.data, usize(bytes.len)) }
+						}
+						println('[+] Wrote ' + bytes.len.str() + ' bytes to $' + (ref_idx + 1).str())
+					}
+				}
+				step_returns << StepReturn{ p_val: voidptr(0), i_val: 0 }
+				continue
+			} else if parts.len >= 4 {
+				target := parts[1]
+				offset := parts[2].int()
+				raw_hex := parts[3]
+				bytes := hex_to_bytes(raw_hex)
+				if target in named_buffers {
+					buf := named_buffers[target] or { LocalBuffer{} }
+					if offset < buf.size {
+						avail := buf.size - offset
+						copy_len := if bytes.len > avail { avail } else { bytes.len }
+						unsafe {
+							dst_local := voidptr(u64(buf.ptr) + u64(offset))
+							C.memcpy(dst_local, bytes.data, usize(copy_len))
+						}
+						if target_pid > 0 && buf.remote_ptr != 0 {
+							C.write_remote_mem(target_pid, buf.remote_ptr + u64(offset), bytes.data, usize(copy_len))
+						}
+						println('[+] Wrote ' + copy_len.str() + ' bytes to `' + target + '` at offset +' + offset.str())
+					}
+				}
+				step_returns << StepReturn{ p_val: voidptr(0), i_val: 0 }
+				continue
+			}
+		}
+
 		offset := find_elf_symbol_offset(lib_path, sym_name)
 		if offset == 0 {
-			println("[-] Error: Symbol not found in ELF: " + sym_name)
+			println('[-] Error: Symbol not found in ELF: ' + sym_name)
 			break
 		}
 
 		target_addr := base_addr + offset
-		println("[+] Target Offset: 0x" + offset.hex_full() + " | Address: 0x" + target_addr.hex_full())
+		println('[+] Target Offset: 0x' + offset.hex_full() + ' | Address: 0x' + target_addr.hex_full())
 
 		mut args := []voidptr{}
 		mut remote_args := []u64{}
-		mut ret_format := "hex"
+		mut ret_format := 'hex'
 
 		for i := 1; i < step.len; i++ {
 			arg_str := step[i]
-			if arg_str.starts_with("->") {
+			if arg_str.starts_with('->') {
 				ret_format = arg_str.substr(2, arg_str.len)
-			} else if arg_str.starts_with("s:") {
+			} else if arg_str.starts_with('s:') {
 				val_str := arg_str.substr(2, arg_str.len)
 				args << voidptr(val_str.str)
 				remote_args << u64(val_str.str)
-			} else if arg_str.starts_with("f:") {
+			} else if arg_str.starts_with('f:') {
 				val_str := arg_str.substr(2, arg_str.len)
 				flt_val := val_str.f32()
 				mut u_val := u32(0)
 				unsafe { C.memcpy(&u_val, &flt_val, sizeof(f32)) }
 				args << voidptr(u64(u_val))
 				remote_args << u64(u_val)
-			} else if arg_str.starts_with("d:") {
+			} else if arg_str.starts_with('d:') {
 				val_str := arg_str.substr(2, arg_str.len)
 				dbl_val := val_str.f64()
 				mut u_val := u64(0)
 				unsafe { C.memcpy(&u_val, &dbl_val, sizeof(f64)) }
 				args << voidptr(u_val)
 				remote_args << u_val
-			} else if arg_str.starts_with("p:") {
+			} else if arg_str.starts_with('p:') {
 				val_str := arg_str.substr(2, arg_str.len)
 				mut p_ptr := voidptr(0)
+				mut r_p_ptr := u64(0)
 				if val_str in named_buffers {
-					p_ptr = (named_buffers[val_str] or { LocalBuffer{} }).ptr
-				} else if val_str.starts_with("$") {
+					buf := named_buffers[val_str] or { LocalBuffer{} }
+					p_ptr = buf.ptr
+					r_p_ptr = if buf.remote_ptr != 0 { buf.remote_ptr } else { u64(buf.ptr) }
+				} else if val_str.starts_with('$') {
 					ref_idx := val_str.substr(1, val_str.len).int() - 1
 					if ref_idx >= 0 && ref_idx < step_returns.len {
 						p_ptr = step_returns[ref_idx].p_val
+						r_p_ptr = u64(step_returns[ref_idx].p_val)
 					}
 				} else {
-					hex_val := strconv.parse_uint(val_str.replace("0x", ""), 16, 64) or { 0 }
+					hex_val := strconv.parse_uint(val_str.replace('0x', ''), 16, 64) or { 0 }
 					p_ptr = voidptr(hex_val)
+					r_p_ptr = hex_val
 				}
 				args << p_ptr
-				remote_args << u64(p_ptr)
-			} else if arg_str.starts_with("$") {
+				remote_args << r_p_ptr
+			} else if arg_str.starts_with('$') {
 				ref_idx := arg_str.substr(1, arg_str.len).int() - 1
 				if ref_idx >= 0 && ref_idx < step_returns.len {
 					args << step_returns[ref_idx].p_val
@@ -1167,7 +1295,7 @@ fn main() {
 				}
 			} else {
 				int_val := strconv.parse_int(arg_str, 10, 64) or {
-					i64(strconv.parse_uint(arg_str.replace("0x", ""), 16, 64) or { 0 })
+					i64(strconv.parse_uint(arg_str.replace('0x', ''), 16, 64) or { 0 })
 				}
 				args << voidptr(int_val)
 				remote_args << u64(int_val)
@@ -1178,7 +1306,7 @@ fn main() {
 		mut ret_double := f64(0.0)
 		mut ret_float := f32(0.0)
 
-		is_fp := if ret_format in ["float", "f32", "double", "f64"] { 1 } else { 0 }
+		is_fp := if ret_format in ['float', 'f32', 'double', 'f64'] { 1 } else { 0 }
 
 		if target_pid > 0 {
 			res := C.remote_call_arch(target_pid, target_addr, remote_args.len, remote_args.data, is_fp)
@@ -1232,11 +1360,11 @@ fn main() {
 							step_res_local = func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
 						}
 						else {
-							println("[-] Error: Max 8 arguments supported.")
+							println('[-] Error: Max 8 arguments supported.')
 						}
 					}
 				} else {
-					println("[-] Segmentation Fault captured safely.")
+					println('[-] Segmentation Fault captured safely.')
 				}
 				C.signal(11, voidptr(0))
 				C.signal(7, voidptr(0))
@@ -1252,8 +1380,8 @@ fn main() {
 		mut step_res := StepReturn{}
 
 		match ret_format {
-			"float", "f32" {
-				println("[+] Return (Float): " + ret_float.str())
+			'float', 'f32' {
+				println('[+] Return (Float): ' + ret_float.str())
 				step_res = StepReturn{
 					f_val: ret_float
 					d_val: f64(ret_float)
@@ -1261,8 +1389,8 @@ fn main() {
 					i_val: i64(ret_storage)
 				}
 			}
-			"double", "f64" {
-				println("[+] Return (Double): " + ret_double.str())
+			'double', 'f64' {
+				println('[+] Return (Double): ' + ret_double.str())
 				step_res = StepReturn{
 					d_val: ret_double
 					f_val: f32(ret_double)
@@ -1270,34 +1398,34 @@ fn main() {
 					i_val: i64(ret_storage)
 				}
 			}
-			"string", "str" {
+			'string', 'str' {
 				res_p := voidptr(ret_storage)
 				if u64(res_p) != 0 {
-					println("[+] Return (String): " + unsafe { (&char(res_p)).vstring() })
+					println('[+] Return (String): ' + unsafe { (&char(res_p)).vstring() })
 				} else {
-					println("[+] Return (String): NULL")
+					println('[+] Return (String): NULL')
 				}
 				step_res = StepReturn{
 					p_val: res_p
 					i_val: i64(ret_storage)
 				}
 			}
-			"int", "i64", "i32" {
-				println("[+] Return (Int): " + i64(ret_storage).str())
+			'int', 'i64', 'i32' {
+				println('[+] Return (Int): ' + i64(ret_storage).str())
 				step_res = StepReturn{
 					i_val: i64(ret_storage)
 					p_val: voidptr(ret_storage)
 				}
 			}
-			"bool" {
-				println("[+] Return (Bool): " + (ret_storage != 0).str())
+			'bool' {
+				println('[+] Return (Bool): ' + (ret_storage != 0).str())
 				step_res = StepReturn{
 					i_val: if ret_storage != 0 { 1 } else { 0 }
 					p_val: voidptr(ret_storage)
 				}
 			}
 			else {
-				println("[+] Return (Hex): 0x" + ret_storage.hex_full())
+				println('[+] Return (Hex): 0x' + ret_storage.hex_full())
 				step_res = StepReturn{
 					p_val: voidptr(ret_storage)
 					i_val: i64(ret_storage)
