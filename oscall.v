@@ -1019,14 +1019,14 @@ fn main() {
 	mut local_handle := voidptr(0)
 
 	if target_pid > 0 {
-		println("[*] Mode: Remote Attach (PID: $target_pid)")
+		println("[*] Mode: Remote Attach (PID: ${target_pid})")
 		module_short := os.file_name(lib_path)
 		base_addr = C.get_remote_module_base(target_pid, &char(module_short.str))
 		if base_addr == 0 {
-			println("[-] Error: Module `$module_short` not mapped in PID $target_pid")
+			println("[-] Error: Module `$module_short` not mapped in PID ${target_pid}")
 			return
 		}
-		println("[+] Target Base in PID $target_pid: 0x" + base_addr.hex_full())
+		println("[+] Target Base in PID ${target_pid}: 0x" + base_addr.hex_full())
 	} else {
 		println("[*] Mode: Local Execution (dlopen)")
 		mut loaded_map := map[string]bool{}
